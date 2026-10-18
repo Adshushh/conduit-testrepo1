@@ -1,0 +1,31 @@
+// /bug: opens the bug report form.
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+if(services.size() == 0)
+{
+	return {"text":"No projects are connected yet."};
+}
+serviceOptions = List();
+for each svcName in services.keys()
+{
+	serviceOptions.add({"label":svcName,"value":svcName});
+}
+
+inputs = List();
+inputs.add({"type":"select","name":"service","label":"Project","placeholder":"Select a project","mandatory":true,"options":serviceOptions});
+inputs.add({"type":"text","name":"title","label":"Title","placeholder":"Short summary of the problem","mandatory":true});
+inputs.add({"type":"textarea","name":"description","label":"Description","placeholder":"Steps to reproduce, expected and actual behaviour","mandatory":true});
+inputs.add({"type":"select","name":"severity","label":"Severity","placeholder":"Select severity","mandatory":true,"options":{{"label":"Blocker","value":"blocker"},{"label":"High","value":"high"},{"label":"Medium","value":"medium"},{"label":"Low","value":"low"}}});
+form = {"type":"form","title":"Report a bug","name":"conduitBugForm","button_label":"Submit","inputs":inputs,"action":{"type":"invoke.function","name":"conduitbugsubmit"}};
+return form;
