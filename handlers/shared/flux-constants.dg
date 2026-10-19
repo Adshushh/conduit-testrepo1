@@ -1,0 +1,4 @@
+// Flux bot settings shared by every handler.
+botName = "flux";
+fluxIcon = "/flux.png";
+maxCardButtons = 5;
