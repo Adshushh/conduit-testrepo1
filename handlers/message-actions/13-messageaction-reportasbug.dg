@@ -1,0 +1,91 @@
+// Report as bug: turns a chat message into a bug report. Whoever wrote the message becomes the reporter.
+
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+if(services.size() == 0)
+{
+	return {"text":"No projects are connected yet."};
+}
+serviceOptions = List();
+for each svcName in services.keys()
+{
+	serviceOptions.add({"label":svcName,"value":svcName});
+}
+
+msgText = ifnull(message.get("text"),"").toString().trim();
+sender = message.get("sender");
+senderName = "";
+senderEmail = "";
+if(sender != null)
+{
+	senderName = ifnull(sender.get("name"),"").toString();
+	senderEmail = ifnull(sender.get("email"),"").toString().toLowerCase();
+}
+chatName = ifnull(chat.get("title"),"").toString();
+srcChat = ifnull(chat.get("id"),"").toString();
+srcMsg = ifnull(message.get("id"),"").toString();
+
+// Prefill: first sentence as the title, the whole message as the description.
+firstLine = msgText;
+if(firstLine.contains("\n"))
+{
+	firstLine = firstLine.getPrefix("\n");
+}
+for each stop in {". ","? ","! "}
+{
+	if(firstLine.contains(stop))
+	{
+		firstLine = firstLine.getPrefix(stop) + stop.trim();
+	}
+}
+if(firstLine.length() > 80)
+{
+	firstLine = firstLine.subString(0,80) + "…";
+}
+if(firstLine == "")
+{
+	firstLine = "Issue reported in chat";
+}
+fromLine = "Reported from a message";
+if(senderName != "")
+{
+	fromLine = fromLine + " by " + senderName;
+}
+if(chatName != "")
+{
+	fromLine = fromLine + " in " + chatName;
+}
+descText = msgText;
+if(descText.length() > 900)
+{
+	descText = descText.subString(0,900) + "…";
+}
+descText = descText + "\n\n" + fromLine + ".";
+
+projectInput = {"type":"select","name":"service","label":"Project","placeholder":"Select a project","mandatory":true,"options":serviceOptions};
+if(serviceOptions.size() == 1)
+{
+	projectInput.put("value",serviceOptions.get(0).get("value"));
+}
+inputs = List();
+inputs.add(projectInput);
+inputs.add({"type":"text","name":"title","label":"Title","placeholder":"Short summary of the problem","mandatory":true,"value":firstLine});
+inputs.add({"type":"textarea","name":"description","label":"Description","placeholder":"Steps to reproduce, expected and actual behaviour","mandatory":true,"value":descText});
+inputs.add({"type":"select","name":"severity","label":"Severity","placeholder":"Select severity","mandatory":true,"options":{{"label":"Blocker","value":"blocker"},{"label":"High","value":"high"},{"label":"Medium","value":"medium"},{"label":"Low","value":"low"}}});
+// The submit handler needs these to reply under the original message.
+inputs.add({"type":"hidden","name":"srcuser","value":senderEmail});
+inputs.add({"type":"hidden","name":"srcname","value":senderName});
+inputs.add({"type":"hidden","name":"srcchat","value":srcChat});
+inputs.add({"type":"hidden","name":"srcmsg","value":srcMsg});
+return {"type":"form","title":"Report as bug","name":"conduitBugForm","button_label":"Submit","inputs":inputs,"action":{"type":"invoke.function","name":"conduitbugsubmit"}};
