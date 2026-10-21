@@ -1,0 +1,337 @@
+// Flux: images sent here are attached to one of your open reports. Anything else gets a short help reply.
+botName = "flux";
+// The Marketplace app key (My Extensions -> Conduit -> Connectors). Cliq needs it to find the bot.
+appKey = "PASTE_APP_KEY";
+// Your Cliq data centre: https://cliq.zoho.com for US accounts, https://cliq.zoho.in for India.
+cliqBase = "https://cliq.zoho.com";
+dbName = "conduittickets";
+nowMs = zoho.currenttime.toLong();
+me = user.get("email").toLowerCase();
+
+if(attachments == null || attachments.toString() == "" || attachments.toString() == "[]")
+{
+	return {"text":"Hi " + user.get("first_name") + "! Type */bug* in any chat to report a bug.\nTo add screenshots to a report, tap *Add screenshots* on it and send the images here."};
+}
+
+openStates = {"Needs info","Open","In progress","Fixed"};
+byId = Map();
+ticketIds = List();
+for each wanted in openStates
+{
+	// Read every matching record, 100 at a time. Records are kept once by id, and reading
+	// stops when a page is short or brings nothing new.
+	listResp = Map();
+	listResp.put("status","SUCCESS");
+	pagedList = List();
+	pagedIds = List();
+	pagedMore = true;
+	for each pagedNo in {1,2,3,4,5,6,7,8,9,10}
+	{
+		if(pagedMore)
+		{
+			pagedQuery = Map();
+			pagedQuery.put("criteria","status==" + wanted);
+			pagedQuery.put("limit",100);
+			if(pagedNo > 1)
+			{
+				pagedQuery.put("from_index",(pagedNo - 1) * 100);
+			}
+			pagedResp = zoho.cliq.getRecords(dbName,pagedQuery);
+			pagedAdded = 0;
+			if(pagedResp.get("status") != null && pagedResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
+			{
+				pagedPage = pagedResp.get("list");
+				for each pagedRec in pagedPage
+				{
+					pagedId = pagedRec.get("id").toString();
+					if(!pagedIds.contains(pagedId))
+					{
+						pagedIds.add(pagedId);
+						pagedList.add(pagedRec);
+						pagedAdded = pagedAdded + 1;
+					}
+				}
+				if(pagedPage.size() < 100 || pagedAdded == 0)
+				{
+					pagedMore = false;
+				}
+			}
+			else
+			{
+				pagedMore = false;
+				if(pagedNo == 1)
+				{
+					listResp.put("status","FAILURE");
+				}
+			}
+		}
+	}
+	listResp.put("list",pagedList);
+	if(listResp.get("status") != null && listResp.get("status").equalsIgnoreCase("SUCCESS"))
+	{
+		for each t in listResp.get("list")
+		{
+			meta = t.get("meta").toList();
+			if(meta.size() >= 4 && meta.get(3).toLowerCase() == me)
+			{
+				byId.put(t.get("ticketid"),t);
+				ticketIds.add(t.get("ticketid"));
+			}
+		}
+	}
+}
+if(ticketIds.size() == 0)
+{
+	return {"text":"You don't have an open bug report. Use */bug* first, then add screenshots to it."};
+}
+ticketIds = ticketIds.sort(false);
+
+// Use the report picked in the last 30 minutes, or the only open one.
+attachMap = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("attach");
+	if(p != null && p.get("attach") != null)
+	{
+		attachMap = p.get("attach").toMap();
+	}
+}
+catch (err)
+{
+	attachMap = Map();
+}
+ticket = Map();
+choice = attachMap.get(me);
+if(choice != null && choice.get("until").toLong() > nowMs)
+{
+	for each tid in ticketIds
+	{
+		if(byId.get(tid).get("id").toString() == choice.get("rec").toString())
+		{
+			ticket = byId.get(tid);
+		}
+	}
+}
+if(ticket.size() == 0 && ticketIds.size() == 1)
+{
+	ticket = byId.get(ticketIds.get(0));
+}
+if(ticket.size() == 0)
+{
+	pickButtons = List();
+	shown = 0;
+	for each tid in ticketIds
+	{
+		if(shown < 5)
+		{
+			t = byId.get(tid);
+			label = tid + " · " + t.get("title");
+			if(label.length() > 40)
+			{
+				label = label.subString(0,39) + "…";
+			}
+			pickButtons.add({"label":label,"type":"+","key":"attach-" + t.get("id"),"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+			shown = shown + 1;
+		}
+	}
+	return {"text":"You have " + ticketIds.size() + " open bug reports. Which one are these screenshots for? Pick one, then send the images again.","buttons":pickButtons};
+}
+
+recordId = ticket.get("id").toString();
+ticketId = ticket.get("ticketid");
+tTitle = ticket.get("title");
+tService = ticket.get("meta").toList().get(1);
+assignee = ifnull(ticket.get("assignee"),"unassigned");
+
+// Send to the assignee, else the team lead, else the first admin.
+target = assignee;
+if(target == "unassigned")
+{
+	target = "";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("services");
+		if(p != null && p.get("services") != null)
+		{
+			svc = p.get("services").toMap().get(tService);
+			if(svc != null)
+			{
+				target = ifnull(svc.get("teamlead"),"").toString().trim().toLowerCase();
+			}
+		}
+	}
+	catch (err)
+	{
+		target = "";
+	}
+	if(target == "")
+	{
+		try
+		{
+			p = zoho.cliq.extension.getProperties("admins");
+			if(p != null && p.get("admins") != null)
+			{
+				target = p.get("admins").toString().toList(",").get(0).trim().toLowerCase();
+			}
+		}
+		catch (err)
+		{
+			target = "";
+		}
+	}
+}
+if(target == "")
+{
+	return {"text":"Couldn't find anyone to send this to for " + ticketId + "."};
+}
+
+zoho.cliq.postToBot(botName,{"text":"📎 *" + ticketId + "* · " + tTitle + "\nScreenshot from " + me,"userids":target});
+sent = 0;
+failed = "";
+names = "";
+for each f in attachments
+{
+	names = names + "• " + f.getFileName() + "\n";
+	f.setParamName("files");
+	parts = List();
+	parts.add(f);
+	parts.add({"paramName":"user_id","content":target,"stringPart":"true"});
+	try
+	{
+		resp = invokeurl
+		[
+			url :cliqBase + "/api/v2/bots/" + botName + "/files?appkey=" + zoho.encryption.urlEncode(appKey)
+			type :POST
+			files:parts
+			connection:"conduitcliq"
+			detailed:true
+		];
+		code = resp.get("responseCode").toLong();
+		if(code >= 200 && code < 300)
+		{
+			sent = sent + 1;
+		}
+		else
+		{
+			failed = failed + "\n" + code + " " + resp.get("responseText").toString();
+		}
+	}
+	catch (err)
+	{
+		failed = failed + "\n" + err;
+	}
+}
+if(sent == 0)
+{
+	return {"text":"Couldn't attach that to " + ticketId + "." + failed};
+}
+
+// Note the screenshots on the ticket so whoever gets it later knows.
+details = ifnull(ticket.get("details"),"").toString();
+if(!details.contains("*Screenshots:*"))
+{
+	details = details + "\n\n*Screenshots:*\n";
+}
+details = details + names;
+fitIn = details;
+// details holds 990 characters. Trim the description and old updates first, never the file list.
+fitParts = fitIn.toString().toList("\n\n*");
+fitDesc = "";
+fitNote = "";
+fitFiles = "";
+fitUpdates = List();
+fitPartNo = 0;
+for each fitPart in fitParts
+{
+	if(fitPartNo == 0)
+	{
+		fitDesc = fitPart;
+	}
+	else if(fitPart.startsWith("AI note:*"))
+	{
+		fitNote = fitPart.getSuffix("AI note:*").trim();
+	}
+	else if(fitPart.startsWith("Likely files:*"))
+	{
+		fitFiles = fitPart.getSuffix("Likely files:*").trim();
+	}
+	else if(fitPart.contains(":*"))
+	{
+		fitUpdates.add("\n\n*" + fitPart);
+	}
+	else
+	{
+		fitDesc = fitDesc + "\n\n*" + fitPart;
+	}
+	fitPartNo = fitPartNo + 1;
+}
+fitFilesBlock = "";
+if(fitFiles != "")
+{
+	if(fitFiles.length() > 300)
+	{
+		fitFiles = fitFiles.subString(0,300);
+	}
+	fitFilesBlock = "\n\n*Likely files:*\n" + fitFiles;
+}
+fitNoteBlock = "";
+if(fitNote != "")
+{
+	if(fitNote.length() > 300)
+	{
+		fitNote = fitNote.subString(0,299) + "…";
+	}
+	fitNoteBlock = "\n\n*AI note:* " + fitNote;
+}
+// Updates get at least 300 characters. When that is not enough, the oldest go first.
+fitDescLen = fitDesc.trim().length();
+if(fitDescLen > 400)
+{
+	fitDescLen = 400;
+}
+fitUpdRoom = 990 - fitFilesBlock.length() - fitNoteBlock.length() - fitDescLen;
+if(fitUpdRoom < 300)
+{
+	fitUpdRoom = 300;
+}
+fitTotal = 0;
+for each fitU in fitUpdates
+{
+	fitTotal = fitTotal + fitU.length();
+}
+fitUpdatesBlock = "";
+for each fitU2 in fitUpdates
+{
+	if(fitTotal > fitUpdRoom)
+	{
+		fitTotal = fitTotal - fitU2.length();
+	}
+	else
+	{
+		fitUpdatesBlock = fitUpdatesBlock + fitU2;
+	}
+}
+if(fitUpdatesBlock == "" && fitUpdates.size() > 0)
+{
+	// Even the newest update is too long on its own, so trim it.
+	fitUpdatesBlock = fitUpdates.get(fitUpdates.size() - 1);
+	fitUpdatesBlock = fitUpdatesBlock.subString(0,fitUpdRoom - 1) + "…";
+}
+fitRoom = 990 - fitFilesBlock.length() - fitNoteBlock.length() - fitUpdatesBlock.length();
+if(fitRoom < 150)
+{
+	fitRoom = 150;
+}
+fitDesc = fitDesc.trim();
+if(fitDesc.length() > fitRoom)
+{
+	fitDesc = fitDesc.subString(0,fitRoom - 1) + "…";
+}
+fitOut = fitDesc + fitNoteBlock + fitFilesBlock + fitUpdatesBlock;
+if(fitOut.length() > 990)
+{
+	fitOut = fitOut.subString(0,990);
+}
+details = fitOut;
+zoho.cliq.updateRecord(dbName,recordId,{"details":details});
+return {"text":"📎 Attached to *" + ticketId + "* · " + tTitle};
