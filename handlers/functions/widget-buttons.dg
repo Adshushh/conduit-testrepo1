@@ -1,0 +1,477 @@
+// conduitwidgetaction: buttons in the Desk widget.
+botName = "flux";
+dbName = "conduittickets";
+routeDb = "conduitroutes";
+me = user.get("email").toLowerCase();
+targetId = "";
+if(target != null && target.get("id") != null)
+{
+	targetId = target.get("id").toString();
+}
+if(targetId == "newbug")
+{
+	services = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("services");
+		if(p != null && p.get("services") != null)
+		{
+			services = p.get("services").toMap();
+		}
+	}
+	catch (err)
+	{
+		services = Map();
+	}
+	if(services.size() == 0)
+	{
+		return {"type":"banner","text":"No projects are connected yet.","status":"failure"};
+	}
+	serviceOptions = List();
+	for each svcName in services.keys()
+	{
+		serviceOptions.add({"label":svcName,"value":svcName});
+	}
+	inputs = List();
+	inputs.add({"type":"select","name":"service","label":"Project","placeholder":"Select a project","mandatory":true,"options":serviceOptions});
+	inputs.add({"type":"text","name":"title","label":"Title","placeholder":"Short summary of the problem","mandatory":true});
+	inputs.add({"type":"textarea","name":"description","label":"Description","placeholder":"Steps to reproduce, expected and actual behaviour","mandatory":true});
+	inputs.add({"type":"select","name":"severity","label":"Severity","placeholder":"Select severity","mandatory":true,"options":{{"label":"Blocker","value":"blocker"},{"label":"High","value":"high"},{"label":"Medium","value":"medium"},{"label":"Low","value":"low"}}});
+	// Not from a chat, so updates go to the reporter in Flux.
+	inputs.add({"type":"hidden","name":"srcchat","value":"widget"});
+	return {"type":"form","title":"Report a bug","name":"conduitBugForm","button_label":"Submit","inputs":inputs,"action":{"type":"invoke.function","name":"conduitbugsubmit"}};
+}
+// Stats: admins and team leads get a card in Flux with one button per period.
+if(targetId == "stats")
+{
+	statsAllowed = false;
+	try
+	{
+		p = zoho.cliq.extension.getProperties("admins");
+		if(p != null && p.get("admins") != null)
+		{
+			statsAdmins = p.get("admins").toString().toLowerCase().toList(",");
+			if(statsAdmins.contains(me))
+			{
+				statsAllowed = true;
+			}
+		}
+		p = zoho.cliq.extension.getProperties("services");
+		if(p != null && p.get("services") != null)
+		{
+			statsServices = p.get("services").toMap();
+			for each statsSvc in statsServices.keys()
+			{
+				if(ifnull(statsServices.get(statsSvc).get("teamlead"),"").toString().toLowerCase() == me)
+				{
+					statsAllowed = true;
+				}
+			}
+		}
+	}
+	catch (err)
+	{
+		statsAllowed = false;
+	}
+	if(!statsAllowed)
+	{
+		return {"type":"banner","text":"Statistics are for admins and team leads.","status":"failure"};
+	}
+	statsButtons = List();
+	statsButtons.add({"label":"7 days","type":"+","key":"stats-p7","action":{"type":"invoke.function","data":{"name":"conduitstats"}}});
+	statsButtons.add({"label":"30 days","type":"+","key":"stats-p30","action":{"type":"invoke.function","data":{"name":"conduitstats"}}});
+	statsButtons.add({"label":"90 days","type":"+","key":"stats-p90","action":{"type":"invoke.function","data":{"name":"conduitstats"}}});
+	statsButtons.add({"label":"All time","type":"+","key":"stats-pall","action":{"type":"invoke.function","data":{"name":"conduitstats"}}});
+	statsMsg = Map();
+	statsMsg.put("text","Choose a period to see routing, speed, projects and people.");
+	statsMsg.put("card",{"title":"Conduit stats","theme":"modern-inline"});
+	statsMsg.put("buttons",statsButtons);
+	statsMsg.put("userids",me);
+	statsResp = zoho.cliq.postToBot(botName,statsMsg);
+	if(statsResp != null && statsResp.get("code") != null)
+	{
+		return {"type":"banner","text":"Couldn't reach Flux. Subscribe to the Flux bot and try again.","status":"failure"};
+	}
+	return {"type":"banner","text":"Stats sent to your Flux chat.","status":"success"};
+}
+if(!targetId.startsWith("open-"))
+{
+	return {"type":"banner","text":"Unknown action.","status":"failure"};
+}
+recordId = targetId.subString(5);
+ticketResp = zoho.cliq.getRecordById(dbName,recordId);
+if(ticketResp.get("status") == null || !ticketResp.get("status").equalsIgnoreCase("SUCCESS") || ticketResp.get("object") == null)
+{
+	return {"type":"banner","text":"That ticket no longer exists.","status":"failure"};
+}
+ticket = ticketResp.get("object");
+ticketId = ticket.get("ticketid");
+status = ticket.get("status");
+assignee = ifnull(ticket.get("assignee"),"unassigned").toString().toLowerCase();
+tTitle = ticket.get("title");
+tDetails = ifnull(ticket.get("details"),"");
+meta = ticket.get("meta").toList();
+tSeverity = meta.get(0);
+tService = meta.get(1);
+reporter = meta.get(3);
+followers = "";
+if(meta.size() > 6)
+{
+	followers = meta.get(6);
+}
+// "-" marks an empty follower list when the stats record follows it
+if(followers == "-")
+{
+	followers = "";
+}
+
+admins = "";
+lead = "";
+svc = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		svc = p.get("services").toMap().get(tService);
+		if(svc != null)
+		{
+			lead = ifnull(svc.get("teamlead"),"").toString().toLowerCase();
+		}
+	}
+}
+catch (err)
+{
+	info "settings could not be read";
+}
+isAdmin = admins.toList(",").contains(me);
+isLead = isAdmin || lead == me;
+isReporter = reporter == me || followers.toList(";").contains(me);
+
+statusText = status;
+if(status == "Open" && assignee == "unassigned")
+{
+	statusText = "Needs an owner";
+}
+else if(status == "Open")
+{
+	statusText = "Waiting to be accepted";
+}
+else if(status == "Needs info")
+{
+	statusText = "Waiting for details";
+}
+else if(status == "Fixed")
+{
+	statusText = "Fixed, waiting for confirmation";
+}
+buttons = List();
+cardTitle = ticketId + " · " + statusText;
+
+if(assignee == me || (isLead && assignee == "unassigned") || (isAdmin && !isReporter))
+{
+	// Developers and leads get the full card and their buttons.
+	candList = List();
+	routeResp = zoho.cliq.getRecords("conduitroutes",{"criteria":"ticketrec==" + recordId});
+	if(routeResp.get("status") != null && routeResp.get("status").equalsIgnoreCase("SUCCESS") && routeResp.get("list").size() > 0)
+	{
+		try
+		{
+			candList = routeResp.get("list").get(0).get("candidates").toString().toJSONList();
+		}
+		catch (err)
+		{
+			candList = List();
+		}
+	}
+	tcSvc = Map();
+	if(svc != null)
+	{
+		tcSvc = svc;
+	}
+	tcProjectName = tService;
+	tcReporter = reporter;
+	tcNotes = "";
+	tcAssignee = assignee;
+	// Ticket card: title and description as text, everything else as slides.
+	// details is the description followed by sections like *AI note:* and *Likely files:*
+	tcAll = tDetails.toString();
+	tcParts = tcAll.toList("\n\n*");
+	tcDesc = "";
+	tcNote = "";
+	tcFileText = "";
+	tcExtra = "";
+	tcPartNo = 0;
+	for each tcPart in tcParts
+	{
+		if(tcPartNo == 0)
+		{
+			tcDesc = tcPart;
+		}
+		else if(tcPart.contains(":*"))
+		{
+			tcHead = tcPart.getPrefix(":*");
+			tcBody = tcPart.getSuffix(":*").trim();
+			if(tcHead == "AI note")
+			{
+				tcNote = tcBody;
+			}
+			else if(tcHead == "Likely files")
+			{
+				tcFileText = tcBody;
+			}
+			else
+			{
+				if(tcExtra != "")
+				{
+					tcExtra = tcExtra + "\n\n";
+				}
+				tcExtra = tcExtra + "*" + tcHead + ":* " + tcBody;
+			}
+		}
+		else
+		{
+			tcDesc = tcDesc + "\n\n*" + tcPart;
+		}
+		tcPartNo = tcPartNo + 1;
+	}
+	tcText = "*" + tTitle.toString() + "*\n" + tcDesc;
+	tcRepoPath = "";
+	tcRef = "HEAD";
+	tcProject = tcProjectName;
+	if(tcSvc.get("owner") != null && tcSvc.get("repo") != null)
+	{
+		tcRepoPath = tcSvc.get("owner").toString() + "/" + tcSvc.get("repo").toString();
+		tcProject = tcProjectName + " (" + tcRepoPath + ")";
+		tcBranch = ifnull(tcSvc.get("branch"),"").toString();
+		if(tcBranch != "")
+		{
+			tcRef = tcBranch;
+		}
+	}
+	tcBaseSlides = List();
+	tcDetailRows = List();
+	tcDetailRows.add({"Project":tcProject});
+	tcDetailRows.add({"Severity":tSeverity.toString()});
+	tcDetailRows.add({"Reported by":tcReporter});
+	if(tcAssignee != "" && tcAssignee != "unassigned")
+	{
+		tcDetailRows.add({"Assigned to":tcAssignee});
+	}
+	if(tcNotes != "")
+	{
+		tcDetailRows.add({"Routing notes":tcNotes});
+	}
+	tcDetailSlide = Map();
+	tcDetailSlide.put("type","label");
+	tcDetailSlide.put("title","Details");
+	tcDetailSlide.put("data",tcDetailRows);
+	tcBaseSlides.add(tcDetailSlide);
+	if(tcNote != "")
+	{
+		tcNoteSlide = Map();
+		tcNoteSlide.put("type","text");
+		tcNoteSlide.put("title","AI note");
+		tcNoteSlide.put("data",tcNote);
+		tcBaseSlides.add(tcNoteSlide);
+	}
+	// Each file line looks like "path (lines 1-20)". Link it when we know the repo.
+	tcFileItems = List();
+	tcFileLines = tcFileText.toList("\n");
+	for each tcLine in tcFileLines
+	{
+		tcItem = tcLine.trim();
+		if(tcItem.startsWith("•"))
+		{
+			tcItem = tcItem.subString(1).trim();
+		}
+		if(tcItem != "")
+		{
+			tcPath = tcItem;
+			tcLines = "";
+			if(tcItem.contains(" (lines ") && tcItem.endsWith(")"))
+			{
+				tcPath = tcItem.getPrefix(" (lines ");
+				tcLines = tcItem.getSuffix(" (lines ");
+				tcLines = tcLines.subString(0,tcLines.length() - 1);
+			}
+			tcShown = tcPath;
+			if(tcRepoPath != "")
+			{
+				tcUrl = "https://github.com/" + tcRepoPath + "/blob/" + tcRef + "/" + tcPath;
+				if(tcLines != "")
+				{
+					tcUrl = tcUrl + "#L" + tcLines.replaceAll("-","-L");
+				}
+				tcShown = "[" + tcPath + "](" + tcUrl + ")";
+			}
+			if(tcLines != "")
+			{
+				tcShown = tcShown + " · lines " + tcLines;
+			}
+			tcFileItems.add(tcShown);
+		}
+	}
+	if(tcFileItems.size() > 0)
+	{
+		tcFileSlide = Map();
+		tcFileSlide.put("type","list");
+		tcFileSlide.put("title","Likely files");
+		tcFileSlide.put("data",tcFileItems);
+		tcBaseSlides.add(tcFileSlide);
+	}
+	if(tcExtra != "")
+	{
+		tcExtraSlide = Map();
+		tcExtraSlide.put("type","text");
+		tcExtraSlide.put("title","Updates");
+		tcExtraSlide.put("data",tcExtra);
+		tcBaseSlides.add(tcExtraSlide);
+	}
+	// Team leads also see how much of the code each person wrote.
+	tcOwnerDev = List();
+	tcOwnerLead = List();
+	for each tcOc in candList
+	{
+		if(tcOwnerDev.size() < 4)
+		{
+			tcOcKey = ifnull(tcOc.get("key"),"").toString();
+			tcOcGithub = tcOcKey;
+			if(tcOcKey != "" && !tcOcKey.contains("@"))
+			{
+				tcOcGithub = "@" + tcOcKey;
+			}
+			tcOcName = ifnull(tcOc.get("name"),"").toString();
+			if(tcOcName == "")
+			{
+				tcOcName = tcOcKey;
+			}
+			tcOcCliq = ifnull(tcOc.get("cliq"),"").toString();
+			if(tcOcCliq == "")
+			{
+				tcOcCliq = "Not linked";
+			}
+			tcOcShare = ifnull(tcOc.get("share"),"").toString();
+			if(tcOcShare == "")
+			{
+				tcOcShare = "—";
+			}
+			else
+			{
+				tcOcShare = tcOcShare + "%";
+			}
+			tcDevRow = Map();
+			tcDevRow.put("Developer",tcOcName);
+			tcDevRow.put("GitHub",tcOcGithub);
+			tcDevRow.put("Cliq user",tcOcCliq);
+			tcOwnerDev.add(tcDevRow);
+			tcLeadRow = Map();
+			tcLeadRow.put("Developer",tcOcName);
+			tcLeadRow.put("GitHub",tcOcGithub);
+			tcLeadRow.put("Cliq user",tcOcCliq);
+			tcLeadRow.put("Share",tcOcShare);
+			tcOwnerLead.add(tcLeadRow);
+		}
+	}
+	tcSlides = List();
+	tcSlides.addAll(tcBaseSlides);
+	tcLeadSlides = List();
+	tcLeadSlides.addAll(tcBaseSlides);
+	if(tcOwnerDev.size() > 0)
+	{
+		tcDevTable = Map();
+		tcDevTable.put("type","table");
+		tcDevTable.put("title","Likely owners");
+		tcDevTable.put("data",{"headers":{"Developer","GitHub","Cliq user"},"rows":tcOwnerDev});
+		tcSlides.add(tcDevTable);
+		tcLeadTable = Map();
+		tcLeadTable.put("type","table");
+		tcLeadTable.put("title","Likely owners");
+		tcLeadTable.put("data",{"headers":{"Developer","GitHub","Cliq user","Share"},"rows":tcOwnerLead});
+		tcLeadSlides.add(tcLeadTable);
+	}
+	cardText = tcText;
+	cardSlides = tcSlides;
+	if(isLead)
+	{
+		cardSlides = tcLeadSlides;
+	}
+	if(status == "Open" && (assignee == me || assignee == "unassigned"))
+	{
+		buttons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		if(assignee == me)
+		{
+			buttons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		}
+		buttons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		buttons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		buttons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	}
+	else if(status == "In progress" && assignee == me)
+	{
+		buttons.add({"label":"Mark fixed","type":"+","key":"fixed-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		buttons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	}
+}
+else if(isReporter)
+{
+	// Reporters only see their report and its status.
+	plain = tDetails;
+	if(plain.contains("\n\n*AI note:*"))
+	{
+		plain = plain.getPrefix("\n\n*AI note:*");
+	}
+	if(plain.contains("\n\n*Likely files:*"))
+	{
+		plain = plain.getPrefix("\n\n*Likely files:*");
+	}
+	cardText = "*" + tTitle + "*\n" + plain;
+	reporterRows = List();
+	reporterRows.add({"Project":tService});
+	reporterRows.add({"Severity":tSeverity.toString()});
+	reporterRows.add({"Status":statusText});
+	reporterSlide = Map();
+	reporterSlide.put("type","label");
+	reporterSlide.put("title","Details");
+	reporterSlide.put("data",reporterRows);
+	cardSlides = List();
+	cardSlides.add(reporterSlide);
+	if(reporter == me)
+	{
+		if(status == "Fixed")
+		{
+			buttons.add({"label":"Close ticket","type":"+","key":"close-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+			buttons.add({"label":"Still broken","type":"-","key":"broken-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		}
+		else if(status == "Needs info")
+		{
+			buttons.add({"label":"Answer","type":"+","key":"answer-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		}
+		buttons.add({"label":"Add screenshots","type":"+","key":"attach-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	}
+}
+else
+{
+	return {"type":"banner","text":"This ticket isn't assigned to or reported by you.","status":"failure"};
+}
+
+msg = {"text":cardText,"card":{"title":cardTitle,"theme":"modern-inline"},"userids":me};
+msg.put("slides",cardSlides);
+if(buttons.size() > 0)
+{
+	msg.put("buttons",buttons);
+}
+try
+{
+	zoho.cliq.postToBot(botName,msg);
+}
+catch (err)
+{
+	return {"type":"banner","text":"Couldn't reach Flux. Subscribe to the Flux bot and try again.","status":"failure"};
+}
+return {"type":"banner","text":ticketId + " sent to your Flux chat.","status":"success"};
