@@ -1,0 +1,388 @@
+// Desk widget: the view.
+dbName = "conduittickets";
+me = user.get("email").toLowerCase();
+tab = "assigned";
+if(target != null && target.containKey("id"))
+{
+	tab = target.get("id").toString();
+}
+nowMs = zoho.currenttime.toLong();
+header = {"title":"Desk","navigation":"new","buttons":{{"label":"Report a bug","type":"invoke.function","name":"conduitwidgetaction","id":"newbug"}}};
+
+admins = "";
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	info "settings could not be read";
+}
+isAdmin = admins.toList(",").contains(me);
+isLead = isAdmin;
+for each svcName in services.keys()
+{
+	if(ifnull(services.get(svcName).get("teamlead"),"").toString().toLowerCase() == me)
+	{
+		isLead = true;
+	}
+}
+// Admins and team leads also get a Stats button, which sends the stats card to Flux.
+if(isLead)
+{
+	header = {"title":"Desk","navigation":"new","buttons":{{"label":"Report a bug","type":"invoke.function","name":"conduitwidgetaction","id":"newbug"},{"label":"Stats","type":"invoke.function","name":"conduitwidgetaction","id":"stats"}}};
+}
+sevIcon = {"Blocker":"🔴","High":"🟠","Medium":"🟡","Low":"⚪"};
+
+statuses = {"Open","In progress","Needs info","Fixed"};
+if(tab == "overview")
+{
+	statuses = {"Open","In progress","Needs info","Fixed","Closed","Won't fix"};
+}
+tickets = List();
+doneCount = 0;
+for each st in statuses
+{
+	// Read every matching record, 100 at a time. Records are kept once by id, and reading
+	// stops when a page is short or brings nothing new.
+	resp = Map();
+	resp.put("status","SUCCESS");
+	pagedList = List();
+	pagedIds = List();
+	pagedMore = true;
+	for each pagedNo in {1,2,3,4,5,6,7,8,9,10}
+	{
+		if(pagedMore)
+		{
+			pagedQuery = Map();
+			pagedQuery.put("criteria","status==" + st);
+			pagedQuery.put("limit",100);
+			if(pagedNo > 1)
+			{
+				pagedQuery.put("from_index",(pagedNo - 1) * 100);
+			}
+			pagedResp = zoho.cliq.getRecords(dbName,pagedQuery);
+			pagedAdded = 0;
+			if(pagedResp.get("status") != null && pagedResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
+			{
+				pagedPage = pagedResp.get("list");
+				for each pagedRec in pagedPage
+				{
+					pagedId = pagedRec.get("id").toString();
+					if(!pagedIds.contains(pagedId))
+					{
+						pagedIds.add(pagedId);
+						pagedList.add(pagedRec);
+						pagedAdded = pagedAdded + 1;
+					}
+				}
+				if(pagedPage.size() < 100 || pagedAdded == 0)
+				{
+					pagedMore = false;
+				}
+			}
+			else
+			{
+				pagedMore = false;
+				if(pagedNo == 1)
+				{
+					resp.put("status","FAILURE");
+				}
+			}
+		}
+	}
+	resp.put("list",pagedList);
+	if(resp.get("status") != null && resp.get("status").equalsIgnoreCase("SUCCESS"))
+	{
+		for each t in resp.get("list")
+		{
+			if(st == "Closed" || st == "Won't fix")
+			{
+				doneCount = doneCount + 1;
+			}
+			else
+			{
+				tickets.add(t);
+			}
+		}
+	}
+}
+
+assignedList = List();
+reportedList = List();
+ownerList = List();
+for each t in tickets
+{
+	meta = t.get("meta").toList();
+	if(meta.size() >= 4)
+	{
+		project = meta.get(1);
+		reporter = meta.get(3);
+		followers = "";
+		if(meta.size() > 6)
+		{
+			followers = meta.get(6);
+		}
+		if(followers == "-")
+		{
+			followers = "";
+		}
+		assignee = ifnull(t.get("assignee"),"unassigned").toString().toLowerCase();
+		status = t.get("status");
+		if(assignee == me)
+		{
+			assignedList.add(t);
+		}
+		if(reporter == me || followers.toList(";").contains(me))
+		{
+			reportedList.add(t);
+		}
+		if(assignee == "unassigned" && status == "Open")
+		{
+			lead = "";
+			svc = services.get(project);
+			if(svc != null)
+			{
+				lead = ifnull(svc.get("teamlead"),"").toString().toLowerCase();
+			}
+			if(isAdmin || lead == me)
+			{
+				ownerList.add(t);
+			}
+		}
+	}
+}
+summary = assignedList.size() + " assigned · " + reportedList.size() + " reported";
+if(isLead)
+{
+	summary = summary + " · " + ownerList.size() + " need an owner";
+}
+
+if(tab == "overview")
+{
+	if(!isLead)
+	{
+		return {"type":"applet","data_type":"sections","sections":{{"id":"none","elements":{{"type":"text","text":"The overview is for team leads and admins."}}}},"header":header};
+	}
+	byStatus = {"Needs an owner":0,"Waiting":0,"In progress":0,"Needs info":0,"Fixed":0};
+	bySeverity = {"Blocker":0,"High":0,"Medium":0,"Low":0};
+	workload = Map();
+	weekCount = 0;
+	oldestMins = 0;
+	oldestId = "";
+	for each t in tickets
+	{
+		meta = t.get("meta").toList();
+		status = t.get("status");
+		assignee = ifnull(t.get("assignee"),"unassigned").toString().toLowerCase();
+		key = status;
+		if(status == "Open" && assignee == "unassigned")
+		{
+			key = "Needs an owner";
+		}
+		else if(status == "Open")
+		{
+			key = "Waiting";
+		}
+		if(byStatus.get(key) != null)
+		{
+			byStatus.put(key,byStatus.get(key).toLong() + 1);
+		}
+		if(meta.size() > 0 && bySeverity.get(meta.get(0)) != null)
+		{
+			bySeverity.put(meta.get(0),bySeverity.get(meta.get(0)).toLong() + 1);
+		}
+		if(assignee != "unassigned")
+		{
+			w = workload.get(assignee);
+			if(w == null)
+			{
+				w = {"open":0,"progress":0};
+			}
+			if(status == "In progress")
+			{
+				w.put("progress",w.get("progress").toLong() + 1);
+			}
+			else
+			{
+				w.put("open",w.get("open").toLong() + 1);
+			}
+			workload.put(assignee,w);
+		}
+		try
+		{
+			ticketId = t.get("ticketid").toString();
+			createdMs = ticketId.subString(4).toTime("yyMMddHHmmss").toLong();
+			mins = ((nowMs - createdMs) / 60000).toLong();
+			if(mins <= 10080)
+			{
+				weekCount = weekCount + 1;
+			}
+			if(mins > oldestMins)
+			{
+				oldestMins = mins;
+				oldestId = ticketId;
+			}
+		}
+		catch (err)
+		{
+			info "skipped a ticket id";
+		}
+	}
+	oldestText = "—";
+	if(oldestId != "")
+	{
+		if(oldestMins < 60)
+		{
+			oldestText = oldestId + " (" + oldestMins + " min)";
+		}
+		else if(oldestMins < 1440)
+		{
+			oldestText = oldestId + " (" + (oldestMins / 60).toLong() + " h)";
+		}
+		else
+		{
+			oldestText = oldestId + " (" + (oldestMins / 1440).toLong() + " d)";
+		}
+	}
+	sections = List();
+	sections.add({"id":"numbers","elements":{{"type":"title","text":"At a glance"},{"type":"fields","data":{{"Open tickets":tickets.size().toString()},{"Need an owner":byStatus.get("Needs an owner").toString()},{"Reported this week":weekCount.toString()},{"Resolved":doneCount.toString()},{"Oldest open":oldestText}}}}});
+	statusValues = List();
+	for each k in byStatus.keys()
+	{
+		statusValues.add({"label":k,"value":byStatus.get(k)});
+	}
+	sections.add({"id":"status","elements":{{"type":"title","text":"Open tickets by status"},{"type":"graph","styles":{"preview":"vertical_bar","y_axis":{"title":"tickets"}},"data":{{"category":"Status","values":statusValues}}}}});
+	sevData = List();
+	for each k in bySeverity.keys()
+	{
+		if(bySeverity.get(k).toLong() > 0)
+		{
+			sevData.add({"label":sevIcon.get(k) + " " + k,"value":bySeverity.get(k)});
+		}
+	}
+	if(sevData.size() > 0)
+	{
+		sections.add({"id":"severity","elements":{{"type":"title","text":"Open tickets by severity"},{"type":"percentage_chart","styles":{"preview":"doughnut"},"data":sevData}}});
+	}
+	if(workload.size() > 0)
+	{
+		rows = List();
+		for each dev in workload.keys()
+		{
+			w = workload.get(dev);
+			rows.add({"Developer":dev,"Waiting":w.get("open").toString(),"In progress":w.get("progress").toString()});
+		}
+		sections.add({"id":"team","elements":{{"type":"title","text":"Team workload"},{"type":"table","headers":{"Developer","Waiting","In progress"},"rows":rows}}});
+	}
+	return {"type":"applet","data_type":"sections","sections":sections,"header":header};
+}
+
+pick = assignedList;
+emptyText = "Nothing is assigned to you right now.";
+if(tab == "reported")
+{
+	pick = reportedList;
+	emptyText = "You have no open reports.";
+}
+else if(tab == "owner")
+{
+	pick = ownerList;
+	emptyText = "Every open bug has an owner.";
+}
+sections = List();
+sections.add({"id":"summary","elements":{{"type":"text","text":summary}}});
+if(pick.size() == 0)
+{
+	sections.add({"id":"empty","elements":{{"type":"text","text":emptyText}}});
+}
+shown = 0;
+for each t in pick
+{
+	if(shown < 20)
+	{
+		shown = shown + 1;
+		recId = t.get("id").toString();
+		ticketId = t.get("ticketid").toString();
+		meta = t.get("meta").toList();
+		project = meta.get(1);
+		severity = meta.get(0);
+		status = t.get("status");
+		assignee = ifnull(t.get("assignee"),"unassigned").toString();
+		statusText = status;
+		if(status == "Open" && assignee == "unassigned")
+		{
+			statusText = "Needs an owner";
+		}
+		else if(status == "Open")
+		{
+			statusText = "Waiting to be accepted";
+		}
+		else if(status == "Needs info")
+		{
+			statusText = "Waiting for details";
+		}
+		else if(status == "Fixed")
+		{
+			statusText = "Fixed, waiting for confirmation";
+		}
+		// Old ids (BUG-yyMMddHHmmss) carry the time; new ones use the record time.
+		ageText = "";
+		try
+		{
+			createdMs = 0;
+			if(ticketId.startsWith("BUG-") && ticketId.length() == 16)
+			{
+				createdMs = ticketId.subString(4).toTime("yyMMddHHmmss").toLong();
+			}
+			else
+			{
+				createdMs = t.get("created_time").toLong();
+			}
+			mins = ((nowMs - createdMs) / 60000).toLong();
+			if(mins < 60)
+			{
+				ageText = mins + " min ago";
+			}
+			else if(mins < 1440)
+			{
+				ageText = (mins / 60).toLong() + " h ago";
+			}
+			else
+			{
+				ageText = (mins / 1440).toLong() + " d ago";
+			}
+		}
+		catch (err)
+		{
+			ageText = "";
+		}
+		icon = ifnull(sevIcon.get(severity),"⚪");
+		line = ticketId + " · " + project + " · " + severity + " · " + statusText;
+		if(ageText != "")
+		{
+			line = line + " · " + ageText;
+		}
+		elements = List();
+		elements.add({"type":"title","text":icon + " " + t.get("title")});
+		elements.add({"type":"text","text":line});
+		elements.add({"type":"buttons","buttons":{{"label":"Open in Flux","type":"invoke.function","name":"conduitwidgetaction","id":"open-" + recId}}});
+		sections.add({"id":"t" + recId,"elements":elements});
+	}
+}
+if(pick.size() > 20)
+{
+	moreCount = pick.size().toLong() - 20;
+	sections.add({"id":"more","elements":{{"type":"text","text":"+ " + moreCount.toString() + " more"}}});
+}
+return {"type":"applet","data_type":"sections","sections":sections,"header":header};

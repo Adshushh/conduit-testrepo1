@@ -1,0 +1,39 @@
+// Desk widget: tabs. Leads and admins also get Overview and Needs an owner.
+me = user.get("email").toLowerCase();
+isLead = false;
+try
+{  
+	p = zoho.cliq.extension.getProperties("admins");  
+	if(p != null && p.get("admins") != null && p.get("admins").toString().toLowerCase().toList(",").contains(me))  
+	{  
+		isLead = true;  
+	}  
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+		for each svcName in services.keys()  
+		{  
+			if(ifnull(services.get(svcName).get("teamlead"),"").toString().toLowerCase() == me)  
+			{  
+				isLead = true;  
+			}  
+		}
+	}
+}
+catch (err)
+{  
+	info "settings could not be read";  
+}  
+tabs = List();  
+if(isLead)  
+{  
+	tabs.add({"label":"Overview","id":"overview"});
+}
+tabs.add({"label":"Assigned to me","id":"assigned"});
+tabs.add({"label":"Reported by me","id":"reported"});
+if(isLead)  
+{  
+	tabs.add({"label":"Needs an owner","id":"owner"});  
+}  
+return {"tabs":tabs,"tab_view_type":"classic"};  
