@@ -2,12 +2,19 @@
 // dupjoin-<new>-<existing> joins the existing ticket; dupnew-<new> files it as a new bug.
 botName = "flux";
 dbName = "conduittickets";
+routeDb = "conduitroutes";
+nowMs = zoho.currenttime.toLong();
+keyParts = arguments.get("key").toList("-");
 op = keyParts.get(0);
 recordId = keyParts.get(1);
 me = user.get("email").toLowerCase();
 myName = user.get("first_name");
 
 ticketResp = zoho.cliq.getRecordById(dbName,recordId);
+if(ticketResp.get("status") == null || !ticketResp.get("status").equalsIgnoreCase("SUCCESS") || ticketResp.get("object") == null)
+{
+	return {"text":"Couldn't find that report any more."};
+}
 ticket = ticketResp.get("object");
 ticketId = ticket.get("ticketid");
 status = ticket.get("status");
@@ -20,6 +27,10 @@ reporter = meta.get(3);
 if(me != reporter)
 {
 	return {"text":"Only the person who reported this can decide."};
+}
+if(status != "Draft")
+{
+	return {"text":"This report has already been handled."};
 }
 
 admins = "";
@@ -47,6 +58,18 @@ catch (err)
 {
 	info "some settings could not be read";
 }
+svc = services.get(tService);
+escalateTo = "";
+if(svc != null)
+{
+	escalateTo = ifnull(svc.get("teamlead"),"").toString().trim().toLowerCase();
+}
+escalateName = "the " + tService + " team lead (" + escalateTo + ")";
+if(escalateTo == "")
+{
+	escalateTo = admins;
+	escalateName = "the Conduit admins (" + admins + "), because " + tService + " has no team lead set";
+}
 
 if(op == "dupjoin")
 {
@@ -56,6 +79,9 @@ if(op == "dupjoin")
 	{
 		return {"text":"That ticket no longer exists. Use *It's a different bug* to file yours."};
 	}
+	dTicket = dResp.get("object");
+	dId = dTicket.get("ticketid");
+	dTitle = dTicket.get("title");
 	dStatus = ifnull(dTicket.get("status"),"").toString();
 	if(dStatus != "Open" && dStatus != "In progress" && dStatus != "Needs info" && dStatus != "Fixed")
 	{
@@ -65,6 +91,11 @@ if(op == "dupjoin")
 	dMeta = dTicket.get("meta").toList();
 	if(dMeta.size() >= 6)
 	{
+		followers = "";
+		if(dMeta.size() > 6)
+		{
+			followers = dMeta.get(6);
+		}
 		// "-" marks an empty follower list when the stats record follows it
 		if(followers == "-")
 		{
@@ -80,6 +111,20 @@ if(op == "dupjoin")
 			{
 				followers = followers + ";" + me;
 			}
+		}
+		metaStr = "";
+		n = 0;
+		for each part in dMeta
+		{
+			if(n < 6)
+			{
+				if(metaStr != "")
+				{
+					metaStr = metaStr + ",";
+				}
+				metaStr = metaStr + part;
+			}
+			n = n + 1;
 		}
 		metaStr = metaStr + "," + followers;
 		// keep the stats record (meta field 8)
@@ -106,6 +151,9 @@ if(op == "dupjoin")
 		fitParts = fitIn.toString().toList("\n\n*");
 		fitDesc = "";
 		fitNote = "";
+		fitFiles = "";
+		fitUpdates = List();
+		fitPartNo = 0;
 		for each fitPart in fitParts
 		{
 			if(fitPartNo == 0)
@@ -130,6 +178,15 @@ if(op == "dupjoin")
 			}
 			fitPartNo = fitPartNo + 1;
 		}
+		fitFilesBlock = "";
+		if(fitFiles != "")
+		{
+			if(fitFiles.length() > 300)
+			{
+				fitFiles = fitFiles.subString(0,300);
+			}
+			fitFilesBlock = "\n\n*Likely files:*\n" + fitFiles;
+		}
 		fitNoteBlock = "";
 		if(fitNote != "")
 		{
@@ -138,6 +195,12 @@ if(op == "dupjoin")
 				fitNote = fitNote.subString(0,299) + "…";
 			}
 			fitNoteBlock = "\n\n*AI note:* " + fitNote;
+		}
+		// Updates get at least 300 characters. When that is not enough, the oldest go first.
+		fitDescLen = fitDesc.trim().length();
+		if(fitDescLen > 400)
+		{
+			fitDescLen = 400;
 		}
 		fitUpdRoom = 990 - fitFilesBlock.length() - fitNoteBlock.length() - fitDescLen;
 		if(fitUpdRoom < 300)
@@ -161,10 +224,21 @@ if(op == "dupjoin")
 				fitUpdatesBlock = fitUpdatesBlock + fitU2;
 			}
 		}
+		if(fitUpdatesBlock == "" && fitUpdates.size() > 0)
+		{
+			// Even the newest update is too long on its own, so trim it.
+			fitUpdatesBlock = fitUpdates.get(fitUpdates.size() - 1);
+			fitUpdatesBlock = fitUpdatesBlock.subString(0,fitUpdRoom - 1) + "…";
+		}
 		fitRoom = 990 - fitFilesBlock.length() - fitNoteBlock.length() - fitUpdatesBlock.length();
 		if(fitRoom < 150)
 		{
 			fitRoom = 150;
+		}
+		fitDesc = fitDesc.trim();
+		if(fitDesc.length() > fitRoom)
+		{
+			fitDesc = fitDesc.subString(0,fitRoom - 1) + "…";
 		}
 		fitOut = fitDesc + fitNoteBlock + fitFilesBlock + fitUpdatesBlock;
 		if(fitOut.length() > 990)
@@ -183,6 +257,9 @@ if(op == "dupjoin")
 			zoho.cliq.updateRecord(routeDb,rResp.get("list").get(0).get("id").toString(),{"pending":"merged:" + dupRec});
 		}
 	}
+	// let whoever has the ticket know it came up again
+	dAssignee = ifnull(dTicket.get("assignee"),"unassigned").toString();
+	notifyTo = dAssignee;
 	if(dAssignee == "unassigned")
 	{
 		notifyTo = escalateTo;
@@ -190,6 +267,14 @@ if(op == "dupjoin")
 		{
 			notifyTo = dMeta.get(4).replaceAll(";",",");
 		}
+	}
+	try
+	{
+		zoho.cliq.postToBot(botName,{"text":"➕ *" + dId + "* · " + dTitle + "\n" + myName + " (" + me + ") reported the same bug:\n" + extra,"card":{"title":dId + " · Reported again","theme":"modern-inline"},"userids":notifyTo});
+	}
+	catch (err)
+	{
+		info "could not notify the owner";
 	}
 	dStatusText = dStatus;
 	if(dStatus == "Open")
@@ -204,6 +289,9 @@ if(op == "dupjoin")
 	{
 		dStatusText = "Fix waiting for confirmation";
 	}
+	rows = List();
+	rows.add({"Ticket":dId});
+	rows.add({"Title":dTitle});
 	rows.add({"Status":dStatusText});
 	return {"type":"message_edit","text":"*" + tTitle + "*\nAdded to the existing ticket. You'll get its updates here.","card":{"title":"Bug reported","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
 }
@@ -239,6 +327,24 @@ if(op == "dupnew")
 			info "could not store the ticket for duplicate checks";
 		}
 	}
+	routeId = "";
+	candList = List();
+	declined = "";
+	rResp = zoho.cliq.getRecords(routeDb,{"criteria":"ticketrec==" + recordId});
+	if(rResp.get("status") != null && rResp.get("status").equalsIgnoreCase("SUCCESS") && rResp.get("list").size() > 0)
+	{
+		routeRec = rResp.get("list").get(0);
+		routeId = routeRec.get("id").toString();
+		declined = ifnull(routeRec.get("declined"),"").toString();
+		try
+		{
+			candList = routeRec.get("candidates").toString().toJSONList();
+		}
+		catch (err)
+		{
+			candList = List();
+		}
+	}
 	newAssignee = "";
 	for each cand in candList
 	{
@@ -265,6 +371,12 @@ if(op == "dupnew")
 	{
 		minConfidence = 60;
 	}
+	// Below the minimum confidence, the team lead picks the owner instead.
+	// Candidates carry pct (confidence) and share. The first also carries where, the AI view of the code.
+	chosenPct = 100;
+	whereText = "";
+	confWho = "";
+	whoShown = 0;
 	for each pc in candList
 	{
 		pcEmail = ifnull(pc.get("cliq"),"").toString().toLowerCase();
@@ -292,6 +404,30 @@ if(op == "dupnew")
 			confWho = confWho + "\n   " + pcLabel + ": " + pcShare + "% of the matched code";
 			whoShown = whoShown + 1;
 		}
+	}
+	lowConfidence = false;
+	if(newAssignee != "" && chosenPct < minConfidence)
+	{
+		lowConfidence = true;
+		newAssignee = "";
+	}
+	confText = "";
+	if(lowConfidence)
+	{
+		filled = (chosenPct.toDecimal() / 20).round(0);
+		meter = "";
+		for each step in {1,2,3,4,5}
+		{
+			if(step <= filled)
+			{
+				meter = meter + "▰";
+			}
+			else
+			{
+				meter = meter + "▱";
+			}
+		}
+		confText = "\n\n*Routing confidence:* " + meter + " " + chosenPct.toString() + "% (minimum " + minConfidence.toString() + "%)";
 	}
 	if(whereText != "")
 	{
@@ -352,11 +488,32 @@ if(op == "dupnew")
 		}
 		tcPartNo = tcPartNo + 1;
 	}
+	tcText = "*" + tTitle.toString() + "*\n" + tcDesc;
+	tcRepoPath = "";
+	tcRef = "HEAD";
+	tcProject = tcProjectName;
+	if(tcSvc.get("owner") != null && tcSvc.get("repo") != null)
+	{
+		tcRepoPath = tcSvc.get("owner").toString() + "/" + tcSvc.get("repo").toString();
+		tcProject = tcProjectName + " (" + tcRepoPath + ")";
+		tcBranch = ifnull(tcSvc.get("branch"),"").toString();
+		if(tcBranch != "")
+		{
+			tcRef = tcBranch;
+		}
+	}
+	tcBaseSlides = List();
+	tcDetailRows = List();
+	tcDetailRows.add({"Project":tcProject});
 	tcDetailRows.add({"Severity":tSeverity.toString()});
 	tcDetailRows.add({"Reported by":tcReporter});
 	if(tcAssignee != "" && tcAssignee != "unassigned")
 	{
 		tcDetailRows.add({"Assigned to":tcAssignee});
+	}
+	if(tcNotes != "")
+	{
+		tcDetailRows.add({"Routing notes":tcNotes});
 	}
 	tcDetailSlide = Map();
 	tcDetailSlide.put("type","label");
@@ -371,6 +528,9 @@ if(op == "dupnew")
 		tcNoteSlide.put("data",tcNote);
 		tcBaseSlides.add(tcNoteSlide);
 	}
+	// Each file line looks like "path (lines 1-20)". Link it when we know the repo.
+	tcFileItems = List();
+	tcFileLines = tcFileText.toList("\n");
 	for each tcLine in tcFileLines
 	{
 		tcItem = tcLine.trim();
@@ -404,6 +564,22 @@ if(op == "dupnew")
 			}
 			tcFileItems.add(tcShown);
 		}
+	}
+	if(tcFileItems.size() > 0)
+	{
+		tcFileSlide = Map();
+		tcFileSlide.put("type","list");
+		tcFileSlide.put("title","Likely files");
+		tcFileSlide.put("data",tcFileItems);
+		tcBaseSlides.add(tcFileSlide);
+	}
+	if(tcExtra != "")
+	{
+		tcExtraSlide = Map();
+		tcExtraSlide.put("type","text");
+		tcExtraSlide.put("title","Updates");
+		tcExtraSlide.put("data",tcExtra);
+		tcBaseSlides.add(tcExtraSlide);
 	}
 	// Team leads also see how much of the code each person wrote.
 	tcOwnerDev = List();
@@ -450,9 +626,29 @@ if(op == "dupnew")
 			tcOwnerLead.add(tcLeadRow);
 		}
 	}
+	tcSlides = List();
+	tcSlides.addAll(tcBaseSlides);
+	tcLeadSlides = List();
+	tcLeadSlides.addAll(tcBaseSlides);
+	if(tcOwnerDev.size() > 0)
+	{
+		tcDevTable = Map();
+		tcDevTable.put("type","table");
+		tcDevTable.put("title","Likely owners");
+		tcDevTable.put("data",{"headers":{"Developer","GitHub","Cliq user"},"rows":tcOwnerDev});
+		tcSlides.add(tcDevTable);
+		tcLeadTable = Map();
+		tcLeadTable.put("type","table");
+		tcLeadTable.put("title","Likely owners");
+		tcLeadTable.put("data",{"headers":{"Developer","GitHub","Cliq user","Share"},"rows":tcOwnerLead});
+		tcLeadSlides.add(tcLeadTable);
+	}
 	cardText = tcText;
 	openButtons = List();
 	openButtons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 	openButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 	if(newAssignee != "")
 	{
@@ -487,6 +683,28 @@ if(op == "dupnew")
 	}
 	if(newAssignee == "")
 	{
+		zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":"unassigned"});
+		leadTitle = ticketId + " · Needs an owner";
+		leadText = cardText;
+		// Lead card: the confidence goes before the owners table.
+		tcConfRows = List();
+		if(lowConfidence)
+		{
+			tcFilled = (chosenPct.toDecimal() / 10).round(0);
+			tcMeter = "";
+			for each tcStep in {1,2,3,4,5,6,7,8,9,10}
+			{
+				if(tcStep <= tcFilled)
+				{
+					tcMeter = tcMeter + "▰";
+				}
+				else
+				{
+					tcMeter = tcMeter + "▱";
+				}
+			}
+			tcConfRows.add({"Confidence":tcMeter + " " + chosenPct.toString() + "% (minimum " + minConfidence.toString() + "%)"});
+		}
 		if(whereText != "")
 		{
 			tcWhere = whereText;
@@ -524,6 +742,20 @@ if(op == "dupnew")
 			{
 				tcVerdict = "Clear owner: " + tcFirstName + " has " + tcFirstShare + "% of the matched code";
 			}
+		}
+		if(tcVerdict != "")
+		{
+			tcConfRows.add({"Who":tcVerdict});
+		}
+		tcDecideSlides = List();
+		tcDecideSlides.addAll(tcBaseSlides);
+		if(tcConfRows.size() > 0)
+		{
+			tcConfSlide = Map();
+			tcConfSlide.put("type","label");
+			tcConfSlide.put("title","Routing confidence");
+			tcConfSlide.put("data",tcConfRows);
+			tcDecideSlides.add(tcConfSlide);
 		}
 		if(tcOwnerLead.size() > 0)
 		{
@@ -570,9 +802,25 @@ if(op == "dupnew")
 				}
 				candIndex = candIndex + 1;
 			}
+			for each b in openButtons
+			{
+				bKey = b.get("key");
+				if(bKey.startsWith("forward-") || bKey.startsWith("needinfo-") || bKey.startsWith("wontfix-"))
+				{
+					leadButtons.add(b);
+				}
+			}
 		}
 		else
 		{
+			// Nobody owns it yet, so leave out Not mine.
+			for each b in openButtons
+			{
+				if(!b.get("key").startsWith("notmine-"))
+				{
+					leadButtons.add(b);
+				}
+			}
 		}
 		try
 		{
@@ -587,6 +835,22 @@ if(op == "dupnew")
 		catch (err)
 		{
 			info "could not reach " + escalateName;
+		}
+	}
+	// Conduit stats: who the bug went to first.
+	stMap = Map();
+	if(newAssignee != "")
+	{
+		stMap.put("f",newAssignee);
+		stMap.put("v","direct");
+	}
+	else
+	{
+		stMap.put("f","lead");
+		stMap.put("v","owner");
+		if(lowConfidence)
+		{
+			stMap.put("v","lead");
 		}
 	}
 	// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
@@ -618,6 +882,11 @@ if(op == "dupnew")
 			stIndex = stIndex + 1;
 		}
 	}
+	if(stIndex == 6)
+	{
+		stMetaText = stMetaText + ",-";
+		stIndex = 7;
+	}
 	if(stIndex == 7)
 	{
 		try
@@ -628,6 +897,10 @@ if(op == "dupnew")
 		{
 			info "stats not saved";
 		}
+	}
+	if(routeId != "")
+	{
+		zoho.cliq.updateRecord(routeDb,routeId,{"declined":declined,"pending":"","reminders":0,"changedat":nowMs});
 	}
 	rStatus = "With the " + tService + " team";
 	if(newAssignee != "")
