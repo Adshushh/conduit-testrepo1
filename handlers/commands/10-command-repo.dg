@@ -1,0 +1,288 @@
+// /repo: setup and the admin menu.
+me = user.get("email").toLowerCase();
+
+// The first person to run /repo becomes an admin.
+admins = "";
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+if(admins == "")
+{
+	admins = me;
+	zoho.cliq.extension.setProperties({"admins":me});
+}
+if(!admins.toList(",").contains(me))
+{
+	return {"text":"Only Conduit administrators can manage repositories."};
+}
+
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+people = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("people");
+	if(p != null && p.get("people") != null)
+	{
+		people = p.get("people").toMap();
+	}
+}
+catch (err)
+{
+	people = Map();
+}
+indexer = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("indexer");
+	if(p != null && p.get("indexer") != null)
+	{
+		indexer = p.get("indexer").toMap();
+	}
+}
+catch (err)
+{
+	indexer = Map();
+}
+routing = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("routing");
+	if(p != null && p.get("routing") != null)
+	{
+		routing = p.get("routing").toMap();
+	}
+}
+catch (err)
+{
+	routing = Map();
+}
+
+// First run in a new org: register with the hosted indexer.
+// Each org gets its own secret, so its code and tickets stay apart from every other org.
+// Admins who host their own indexer can still change the URL and secret in Settings.
+defaultUrl = "https://conduit-indexer-10137053285.development.catalystappsail.com";
+// Same value as CONDUIT_REGISTER_KEY on the indexer.
+registerKey = "PASTE_REGISTER_KEY";
+if(indexer.get("url") == null || indexer.get("secret") == null)
+{
+	try
+	{
+		regResp = invokeurl
+		[
+			url :defaultUrl + "/register"
+			type :POST
+			headers:{"X-Conduit-Register":registerKey}
+			detailed:true
+		];
+		if(regResp.get("responseCode") == 200)
+		{
+			reg = regResp.get("responseText").toString().toMap();
+			if(reg.get("secret") != null)
+			{
+				indexer = Map();
+				indexer.put("url",defaultUrl);
+				indexer.put("secret",reg.get("secret"));
+				zoho.cliq.extension.setProperties({"indexer":indexer.toString()});
+			}
+		}
+	}
+	catch (err)
+	{
+		info "registration failed";
+	}
+}
+
+indexerReady = indexer.get("url") != null && indexer.get("secret") != null;
+indexerState = "Not connected";
+aiState = "—";
+if(indexerReady)
+{
+	indexerState = "Not reachable";
+	try
+	{
+		healthResp = invokeurl
+		[
+			url :indexer.get("url") + "/"
+			type :GET
+			detailed:true
+		];
+		if(healthResp.get("responseCode") == 200)
+		{
+			health = healthResp.get("responseText").toString().toMap();
+			if(health.get("ok") == true)
+			{
+				indexerState = "Connected";
+				aiState = ifnull(health.get("ai"),"—").toString().replaceAll("openai/","");
+			}
+			else
+			{
+				indexerState = "Misconfigured";
+			}
+		}
+	}
+	catch (err)
+	{
+		indexerState = "Not reachable";
+	}
+}
+
+autoRemind = "off";
+try
+{
+	p = zoho.cliq.extension.getProperties("autoremind");
+	if(p != null && p.get("autoremind") != null)
+	{
+		autoRemind = p.get("autoremind").toString();
+	}
+}
+catch (err)
+{
+	autoRemind = "off";
+}
+
+remindHours = ifnull(routing.get("remindhours"),4).toString().toDecimal();
+remindMins = (remindHours * 60).round(0).toLong();
+remindLabel = remindHours + " hours";
+if(remindMins < 60)
+{
+	remindLabel = remindMins + " minutes";
+}
+else if(remindMins % 60 == 0)
+{
+	remindLabel = (remindMins / 60) + " hours";
+}
+
+rows = List();
+rows.add({"Indexer":indexerState});
+rows.add({"AI model":aiState});
+if(autoRemind == "on")
+{
+	rows.add({"Reminders":"On, after " + remindLabel});
+}
+else
+{
+	rows.add({"Reminders":"Off"});
+}
+rows.add({"Repositories":services.size().toString()});
+rows.add({"Linked developers":people.size().toString()});
+rows.add({"Administrators":admins.replaceAll(",",", ")});
+slides = List();
+slides.add({"type":"label","title":"Overview","data":rows});
+
+if(services.size() > 0)
+{
+	repoRows = List();
+	for each svcName in services.keys()
+	{
+		svc = services.get(svcName);
+		leadText = ifnull(svc.get("teamlead"),"").toString();
+		if(leadText == "")
+		{
+			leadText = "—";
+		}
+		indexText = "—";
+		if(indexerReady)
+		{
+			indexText = "Unknown";
+			try
+			{
+				statusResp = invokeurl
+				[
+					url :indexer.get("url") + "/status?namespace=" + svc.get("namespace")
+					type :GET
+					headers:{"X-Conduit-Secret":indexer.get("secret")}
+					detailed:true
+				];
+				if(statusResp.get("responseCode") == 200)
+				{
+					st = statusResp.get("responseText").toString().toMap();
+					state = ifnull(st.get("state"),"").toString();
+					if(state == "ready")
+					{
+						indexText = "Indexed (" + ifnull(st.get("chunks"),0) + " chunks)";
+						// Show whether auto re-index is on and when it last ran.
+						autoInfo = st.get("auto_update");
+						if(autoInfo != null && ifnull(autoInfo.get("state"),"").toString() == "on")
+						{
+							indexText = indexText + " · Auto";
+							updatedText = ifnull(autoInfo.get("updated_at"),"").toString();
+							if(updatedText.matches("[0-9]{9,11}"))
+							{
+								agoMins = ((zoho.currenttime.toLong() / 1000 - updatedText.toLong()) / 60).toLong();
+								if(agoMins < 60)
+								{
+									indexText = indexText + ", updated " + agoMins.toString() + " min ago";
+								}
+								else if(agoMins < 1440)
+								{
+									indexText = indexText + ", updated " + (agoMins / 60).toLong().toString() + " h ago";
+								}
+								else
+								{
+									indexText = indexText + ", updated " + (agoMins / 1440).toLong().toString() + " d ago";
+								}
+							}
+						}
+					}
+					else if(state == "running")
+					{
+						indexText = "Indexing…";
+					}
+					else if(state == "failed")
+					{
+						indexText = "Failed";
+					}
+					else if(state == "missing")
+					{
+						indexText = "Not indexed";
+					}
+				}
+			}
+			catch (err)
+			{
+				indexText = "Unknown";
+			}
+		}
+		repoText = svc.get("owner") + "/" + svc.get("repo");
+		if(ifnull(svc.get("branch"),"").toString() != "")
+		{
+			repoText = repoText + " (" + svc.get("branch") + ")";
+		}
+		repoRows.add({"Project":svcName,"Repository":repoText,"Team lead":leadText,"Index":indexText});
+	}
+	slides.add({"type":"table","title":"Repositories","data":{"headers":{"Project","Repository","Team lead","Index"},"rows":repoRows}});
+}
+
+buttons = List();
+buttons.add({"label":"Add repo","type":"+","key":"create","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+buttons.add({"label":"Edit repo","type":"+","key":"edit","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+buttons.add({"label":"Remove repo","type":"-","key":"delete","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+buttons.add({"label":"Teams","type":"+","key":"teams","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+buttons.add({"label":"Settings","type":"+","key":"settings","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+if(indexerReady)
+{
+	// Show the current state, so an old /repo card is still right.
+	buttons.add({"label":"Reminders","type":"+","key":"reminders","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+}
+return {"text":"Manage repositories and settings.","card":{"title":"Conduit","theme":"modern-inline"},"slides":slides,"buttons":buttons};
