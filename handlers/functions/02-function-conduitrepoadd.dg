@@ -1,0 +1,174 @@
+// conduitrepoadd: checks the token, saves the project and starts indexing.
+token = values.get("token").toString().trim();
+branchWanted = ifnull(values.get("branch"),"").toString().trim();
+leadRaw = ifnull(values.get("teamlead"),"").toString().trim();
+teamLead = "";
+if(leadText.startsWith("{"))
+{
+	leadMap = leadText.toMap();
+	for each leadKey in {"email","email_id","emailid","mail"}
+	{
+		if(teamLead == "" && leadMap.get(leadKey) != null)
+		{
+			teamLead = leadMap.get(leadKey).toString();
+		}
+	}
+}
+else if(leadText.contains("@"))
+{
+	teamLead = leadText;
+}
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+
+parts = repoFull.toList("/");
+if(parts.size() != 2)
+{
+	return {"type":"form_error","text":"The repository must look like owner/name.","inputs":{"repo":"For example gothinkster/angular-realworld-example-app"}};
+}
+[
+	url :"https://api.github.com/repos/" + owner + "/" + repo
+	type :GET
+code = repoResp.get("responseCode");
+if(code == 401)
+{
+	return {"type":"form_error","text":"GitHub rejected that token.","inputs":{"token":"Invalid or expired token"}};
+}
+if(branchWanted != "" && branchWanted != branch)
+{
+	brResp = invokeurl
+	[
+		url :"https://api.github.com/repos/" + owner + "/" + repo + "/branches/" + branchWanted
+		type :GET
+		headers:{"Authorization":"Bearer " + token,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+		detailed:true
+	];
+	if(brResp.get("responseCode") != 200)
+	{
+		return {"type":"form_error","text":"There is no branch called " + branchWanted + " in " + owner + "/" + repo + ".","inputs":{"branch":"Check the branch name, or leave it blank"}};
+	}
+	branch = branchWanted;
+}
+
+if(services.containsKey(servicename))
+{
+	return {"type":"form_error","text":"A project named " + servicename + " already exists.","inputs":{"servicename":"Choose another name, or use Edit repo"}};
+}
+for each existingName in services.keys()
+{
+	existing = services.get(existingName);
+	if(existing.get("owner").toString().equalsIgnoreCase(owner) && existing.get("repo").toString().equalsIgnoreCase(repo))
+	{
+		return {"type":"form_error","text":owner + "/" + repo + " is already connected as " + existingName + ".","inputs":{"repo":"Already connected"}};
+	}
+}
+[
+	url :memberUrl
+	type :GET
+memberCode = memberResp.get("responseCode").toString();
+if(memberCode == "200")
+{
+	memberList = List();
+	try
+	{
+		memberList = memberResp.get("responseText").toString().toMap().get("data").toString().toJSONList();
+	}
+	catch (err)
+	{
+		memberList = List();
+	}
+	for each memberItem in memberList
+	{
+		memberFound = ifnull(memberItem.toString().toMap().get("email_id"),"").toString().toLowerCase();
+		if(memberFound == memberEmail)
+		{
+			leadReached = true;
+		}
+	}
+}
+else
+{
+	memberProblem = "Couldn't check organization membership (Cliq said " + memberCode + "). An admin needs to re-authorize the conduitcliq connection.";
+}
+serviceConfig.put("namespace",namespace);
+serviceConfig.put("teamlead",teamLead);
+serviceConfig.put("branch",branch);
+zoho.cliq.extension.setProperties(dataMap);
+
+indexer = Map();
+leadText = teamLead;
+if(leadText == "")
+{
+	leadText = "Administrators";
+}
+indexState = "Not started";
+indexNote = "";
+autoText = "";
+if(indexer.get("url") == null || indexer.get("secret") == null)
+{
+	indexNote = "Connect the indexer in Settings, then use Edit repo.";
+}
+else
+{
+	try
+	{
+		indexResp = invokeurl
+		[
+			url :indexer.get("url") + "/index"
+			detailed:true
+		];
+		indexCode = indexResp.get("responseCode");
+		if(indexCode == 202)
+		{
+			try
+			{
+				indexReply = indexResp.get("responseText").toString().toMap();
+				autoInfo = indexReply.get("auto_update");
+				if(autoInfo != null)
+				{
+					if(ifnull(autoInfo.get("state"),"").toString() == "on")
+					{
+						autoText = "On: changed files are re-indexed after every push";
+					}
+					else
+					{
+						autoText = "Off: " + ifnull(autoInfo.get("reason"),"").toString();
+					}
+				}
+			}
+			catch (err)
+			{
+				autoText = "";
+			}
+		}
+		else if(indexCode == 409)
+		{
+			indexState = "In progress";
+			indexNote = "This repository is already being indexed.";
+		}
+		else if(indexCode == 401)
+		{
+			indexState = "Failed";
+			indexNote = "The indexer rejected the secret. Update it in Settings.";
+		}
+		else
+		{
+		}
+	}
+	catch (err)
+	{
+		indexState = "Failed";
+		indexNote = "The indexer couldn't be reached. Try Edit repo in a minute.";
+	}
+}
+return {"text":indexNote,"card":{"title":"Repository added","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
