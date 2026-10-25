@@ -1,0 +1,329 @@
+// /link: connects GitHub accounts to Cliq users so bugs reach the right person.
+// /link                     admins see every link, others their own
+// /link <github>            admins link it at once, others ask the admins
+// /link <github> <email>    admins only: link it to someone else
+// /link remove <github>     admins remove any link, others only their own
+me = user.get("email").toLowerCase();
+admins = "";
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+isAdmin = admins.toList(",").contains(me);
+people = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("people");
+	if(p != null && p.get("people") != null)
+	{
+		people = p.get("people").toMap();
+	}
+}
+catch (err)
+{
+	people = Map();
+}
+
+argText = "";
+if(arguments != null)
+{
+	argText = arguments.toString().trim();
+}
+github = "";
+target = me;
+if(argText != "")
+{
+	parts = List();
+	for each word in argText.toList(" ")
+	{
+		if(word.trim() != "")
+		{
+			parts.add(word.trim());
+		}
+	}
+	// GitHub usernames keep the case they were typed in; commit emails are lowercased
+	github = parts.get(0);
+	if(github.startsWith("@"))
+	{
+		github = github.subString(1);
+	}
+	if(github.contains("@"))
+	{
+		github = github.toLowerCase();
+	}
+	if(parts.size() > 1)
+	{
+		target = parts.get(1).toLowerCase();
+	}
+}
+
+if(github == "")
+{
+	if(isAdmin)
+	{
+		devButtons = List();
+		devButtons.add({"label":"Link developer","type":"+","key":"peoplelink","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+		devButtons.add({"label":"Unlink developer","type":"-","key":"peopleunlink","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+		// People who left the organization, unlinked by the daily check.
+		peopleLeft = Map();
+		try
+		{
+			p = zoho.cliq.extension.getProperties("peopleleft");
+			if(p != null && p.get("peopleleft") != null)
+			{
+				peopleLeft = p.get("peopleleft").toMap();
+			}
+		}
+		catch (err)
+		{
+			peopleLeft = Map();
+		}
+		leftRows = List();
+		for each leftGh in peopleLeft.keys()
+		{
+			leftItem = peopleLeft.get(leftGh).toString().toMap();
+			leftRows.add({"GitHub user":leftGh,"Cliq user":ifnull(leftItem.get("email"),"").toString(),"Since":ifnull(leftItem.get("when"),"").toString()});
+		}
+		if(leftRows.size() > 0)
+		{
+			devButtons.add({"label":"Restore developer","type":"+","key":"peoplerestore","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+		}
+		if(people.size() == 0 && leftRows.size() == 0)
+		{
+			return {"text":"No developers linked.","card":{"title":"Developers","theme":"modern-inline"},"buttons":devButtons};
+		}
+		devSlides = List();
+		devRows = List();
+		for each gh in people.keys()
+		{
+			devRows.add({"GitHub user":gh,"Cliq user":people.get(gh)});
+		}
+		if(devRows.size() > 0)
+		{
+			devSlides.add({"type":"table","title":"Linked","data":{"headers":{"GitHub user","Cliq user"},"rows":devRows}});
+		}
+		if(leftRows.size() > 0)
+		{
+			devSlides.add({"type":"table","title":"Left the org","data":{"headers":{"GitHub user","Cliq user","Since"},"rows":leftRows}});
+		}
+		return {"text":people.size().toString() + " linked","card":{"title":"Developers","theme":"modern-inline"},"slides":devSlides,"buttons":devButtons};
+	}
+	mine = List();
+	for each gh in people.keys()
+	{
+		if(people.get(gh).toString().toLowerCase() == me)
+		{
+			mine.add(gh);
+		}
+	}
+	if(mine.size() == 0)
+	{
+		return {"text":"No GitHub account is linked to you yet. Use */link username* to add one."};
+	}
+	rows = List();
+	for each gh in mine
+	{
+		rows.add({"GitHub user":gh});
+	}
+	return {"text":"Bugs in code by these accounts are routed to you. Remove one with */link remove username*.","card":{"title":"Your GitHub links","theme":"modern-inline"},"slides":{{"type":"table","data":{"headers":{"GitHub user"},"rows":rows}}}};
+}
+
+if(github.toLowerCase() == "remove")
+{
+	if(parts.size() < 2)
+	{
+		return {"text":"Add the GitHub username to remove, for example */link remove username*."};
+	}
+	removeGh = parts.get(1);
+	if(removeGh.startsWith("@"))
+	{
+		removeGh = removeGh.subString(1);
+	}
+	removeLower = removeGh.toLowerCase();
+	for each rk in people.keys()
+	{
+		if(rk.toLowerCase() == removeLower)
+		{
+			removeGh = rk;
+		}
+	}
+	owner = ifnull(people.get(removeGh),"").toString().toLowerCase();
+	if(owner == "")
+	{
+		return {"text":removeGh + " isn't linked to anyone."};
+	}
+	if(owner != me && !isAdmin)
+	{
+		return {"text":removeGh + " is linked to another person. Only a Conduit admin can remove it."};
+	}
+	people.remove(removeGh);
+	zoho.cliq.extension.setProperties({"people":people.toString()});
+	rows = List();
+	rows.add({"GitHub user":removeGh});
+	rows.add({"Cliq user":owner});
+	return {"text":"New bugs in this account's code will no longer be routed to " + owner + ". Tickets they already have stay with them.","card":{"title":"GitHub account unlinked","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
+}
+
+if(github.length() > 100)
+{
+	return {"text":"That doesn't look like a GitHub username or commit email."};
+}
+if(target != me && !isAdmin)
+{
+	return {"text":"Only a Conduit admin can link other people. Use */link " + github + "* to link it to yourself."};
+}
+if(!target.contains("@"))
+{
+	return {"text":"The second value must be a Cliq email, for example */link " + github + " name@company.com*."};
+}
+existingKey = "";
+githubLower = github.toLowerCase();
+for each gk in people.keys()
+{
+	if(gk.toLowerCase() == githubLower)
+	{
+		existingKey = gk;
+	}
+}
+current = "";
+if(existingKey != "")
+{
+	current = people.get(existingKey).toString().toLowerCase();
+}
+if(current == target)
+{
+	return {"text":github + " is already linked to " + target + "."};
+}
+
+// Not an admin, so ask the admins to approve.
+if(!isAdmin)
+{
+	reqRows = List();
+	reqRows.add({"GitHub user":github});
+	reqRows.add({"Cliq user":me});
+	if(current != "")
+	{
+		reqRows.add({"Currently linked to":current});
+	}
+	reqButtons = List();
+	// Give each request an id so its decision is remembered.
+	reqId = zoho.currenttime.toLong().toString();
+	reqButtons.add({"label":"Approve","type":"+","key":"linkok~" + github + "~" + me + "~" + reqId,"action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	reqButtons.add({"label":"Decline","type":"-","key":"linkno~" + github + "~" + me + "~" + reqId,"action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	reqText = user.get("first_name") + " wants bugs in this GitHub account's code routed to them.";
+	if(current != "")
+	{
+		reqText = reqText + " Approving moves it away from " + current + ".";
+	}
+	sent = true;
+	try
+	{
+		reqMsg = Map();
+		reqMsg.put("text",reqText);
+		reqMsg.put("card",{"title":"Link request","theme":"modern-inline"});
+		reqMsg.put("slides",{{"type":"label","data":reqRows}});
+		reqMsg.put("buttons",reqButtons);
+		reqMsg.put("userids",admins);
+		reqResp = zoho.cliq.postToBot("flux",reqMsg);
+		if(reqResp != null && reqResp.get("code") != null)
+		{
+			sent = false;
+		}
+	}
+	catch (err)
+	{
+		sent = false;
+	}
+	if(!sent)
+	{
+		return {"text":"Couldn't reach the Conduit admins. Ask one of them to link " + github + " for you."};
+	}
+	return {"text":"Request sent to the Conduit admins. Flux will let you know once " + github + " is linked to you.","card":{"title":"Link requested","theme":"modern-inline"},"slides":{{"type":"label","data":{{"GitHub user":github},{"Status":"Waiting for approval"}}}}};
+}
+
+if(target != me)
+{
+	// Only people in this org can be added, so check the email with Cliq first.
+	reached = false;
+	memberProblem = "";
+	memberEmail = target;
+	memberUrl = "https://cliq.zoho.com/api/v2/users?status=active&limit=20&search=" + zoho.encryption.urlEncode(memberEmail);
+	memberResp = invokeurl
+	[
+		url :memberUrl
+		type :GET
+		connection:"conduitcliq"
+		detailed:true
+	];
+	memberCode = memberResp.get("responseCode").toString();
+	if(memberCode == "200")
+	{
+		memberList = List();
+		try
+		{
+			memberList = memberResp.get("responseText").toString().toMap().get("data").toString().toJSONList();
+		}
+		catch (err)
+		{
+			memberList = List();
+		}
+		for each memberItem in memberList
+		{
+			memberFound = ifnull(memberItem.toString().toMap().get("email_id"),"").toString().toLowerCase();
+			if(memberFound == memberEmail)
+			{
+				reached = true;
+			}
+		}
+	}
+	else
+	{
+		memberProblem = "Couldn't check organization membership (Cliq said " + memberCode + "). An admin needs to re-authorize the conduitcliq connection.";
+	}
+	if(memberProblem != "")
+	{
+		return {"text":memberProblem};
+	}
+	if(reached)
+	{
+		try
+		{
+			zoho.cliq.postToBot("flux",{"text":user.get("first_name") + " linked the GitHub account *" + github + "* to you. Bugs in code by this account will now be routed to you.","userids":target});
+		}
+		catch (err)
+		{
+			info "could not send the welcome message";
+		}
+	}
+	if(!reached)
+	{
+		return {"text":target + " isn't a member of this organization, so " + github + " can't be linked to them."};
+	}
+}
+if(existingKey != "")
+{
+	people.remove(existingKey);
+}
+people.put(github,target);
+zoho.cliq.extension.setProperties({"people":people.toString()});
+rows = List();
+rows.add({"GitHub user":github});
+rows.add({"Cliq user":target});
+if(current != "")
+{
+	rows.add({"Previously":current});
+}
+note = "Bugs in code by this account will now be routed to you.";
+if(target != me)
+{
+	note = "Bugs in code by this account will now be routed to " + target + ".";
+}
+return {"text":note,"card":{"title":"GitHub account linked","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
