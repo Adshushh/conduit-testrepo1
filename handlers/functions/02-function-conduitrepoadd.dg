@@ -1,7 +1,20 @@
 // conduitrepoadd: checks the token, saves the project and starts indexing.
+values = form.get("values");
+servicename = values.get("servicename").toString().trim().toLowerCase().replaceAll("[^a-z0-9_-]","-");
+repoFull = values.get("repo").toString().trim();
 token = values.get("token").toString().trim();
 branchWanted = ifnull(values.get("branch"),"").toString().trim();
 leadRaw = ifnull(values.get("teamlead"),"").toString().trim();
+leadText = leadRaw;
+if(leadText.startsWith("["))
+{
+	leadList = leadText.toJSONList();
+	leadText = "";
+	if(leadList.size() > 0)
+	{
+		leadText = leadList.get(0).toString().trim();
+	}
+}
 teamLead = "";
 if(leadText.startsWith("{"))
 {
@@ -18,6 +31,14 @@ else if(leadText.contains("@"))
 {
 	teamLead = leadText;
 }
+teamLead = teamLead.trim().toLowerCase();
+if(!teamLead.contains("@"))
+{
+	return {"type":"form_error","text":"Every project needs a team lead from this organization (" + leadRaw + ").","inputs":{"teamlead":"Choose the team lead again"}};
+}
+me = user.get("email").toLowerCase();
+
+admins = "";
 try
 {
 	p = zoho.cliq.extension.getProperties("admins");
@@ -30,19 +51,53 @@ catch (err)
 {
 	admins = "";
 }
+if(!admins.toList(",").contains(me))
+{
+	return {"type":"form_error","text":"Only a Conduit admin can add a repo."};
+}
 
+repoFull = repoFull.replaceAll("https://github.com/","").replaceAll("http://github.com/","").replaceAll("github.com/","");
+if(repoFull.endsWith(".git"))
+{
+	repoFull = repoFull.subString(0,repoFull.length() - 4);
+}
+if(repoFull.endsWith("/"))
+{
+	repoFull = repoFull.subString(0,repoFull.length() - 1);
+}
 parts = repoFull.toList("/");
 if(parts.size() != 2)
 {
 	return {"type":"form_error","text":"The repository must look like owner/name.","inputs":{"repo":"For example gothinkster/angular-realworld-example-app"}};
 }
+owner = parts.get(0);
+repo = parts.get(1);
+
+repoResp = invokeurl
 [
 	url :"https://api.github.com/repos/" + owner + "/" + repo
 	type :GET
+	headers:{"Authorization":"Bearer " + token,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+	detailed:true
+];
 code = repoResp.get("responseCode");
 if(code == 401)
 {
 	return {"type":"form_error","text":"GitHub rejected that token.","inputs":{"token":"Invalid or expired token"}};
+}
+if(code != 200)
+{
+	return {"type":"form_error","text":"GitHub can't find " + owner + "/" + repo + " with that token (GitHub said " + code + ").","inputs":{"repo":"Check the spelling. For a private repo, the token must have access to it."}};
+}
+// a blank Branch field means the repository default branch
+branch = "";
+try
+{
+	branch = ifnull(repoResp.get("responseText").toString().toMap().get("default_branch"),"").toString();
+}
+catch (err)
+{
+	branch = "";
 }
 if(branchWanted != "" && branchWanted != branch)
 {
@@ -60,6 +115,19 @@ if(branchWanted != "" && branchWanted != branch)
 	branch = branchWanted;
 }
 
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
 if(services.containsKey(servicename))
 {
 	return {"type":"form_error","text":"A project named " + servicename + " already exists.","inputs":{"servicename":"Choose another name, or use Edit repo"}};
@@ -72,9 +140,18 @@ for each existingName in services.keys()
 		return {"type":"form_error","text":owner + "/" + repo + " is already connected as " + existingName + ".","inputs":{"repo":"Already connected"}};
 	}
 }
+// Only people in this org can be added, so check the email with Cliq first.
+leadReached = false;
+memberProblem = "";
+memberEmail = teamLead;
+memberUrl = "https://cliq.zoho.com/api/v2/users?status=active&limit=20&search=" + zoho.encryption.urlEncode(memberEmail);
+memberResp = invokeurl
 [
 	url :memberUrl
 	type :GET
+	connection:"conduitcliq"
+	detailed:true
+];
 memberCode = memberResp.get("responseCode").toString();
 if(memberCode == "200")
 {
@@ -100,12 +177,52 @@ else
 {
 	memberProblem = "Couldn't check organization membership (Cliq said " + memberCode + "). An admin needs to re-authorize the conduitcliq connection.";
 }
+if(memberProblem != "")
+{
+	return {"type":"form_error","text":memberProblem};
+}
+if(leadReached)
+{
+	try
+	{
+		zoho.cliq.postToBot("flux",{"text":"You are the team lead for *" + servicename + "* (" + owner + "/" + repo + ") in Conduit. Bugs nobody owns yet will come to you.","userids":teamLead});
+	}
+	catch (err)
+	{
+		info "could not send the welcome message";
+	}
+}
+if(!leadReached)
+{
+	return {"type":"form_error","text":teamLead + " isn't a member of this organization.","inputs":{"teamlead":"Enter the Cliq email of someone in this organization"}};
+}
+namespace = servicename.toLowerCase();
+serviceConfig = Map();
+serviceConfig.put("type","github");
+serviceConfig.put("token",token);
+serviceConfig.put("owner",owner);
+serviceConfig.put("repo",repo);
 serviceConfig.put("namespace",namespace);
 serviceConfig.put("teamlead",teamLead);
 serviceConfig.put("branch",branch);
+services.put(servicename,serviceConfig);
+dataMap = Map();
+dataMap.put("services",services.toString());
 zoho.cliq.extension.setProperties(dataMap);
 
 indexer = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("indexer");
+	if(p != null && p.get("indexer") != null)
+	{
+		indexer = p.get("indexer").toMap();
+	}
+}
+catch (err)
+{
+	indexer = Map();
+}
 leadText = teamLead;
 if(leadText == "")
 {
@@ -120,16 +237,31 @@ if(indexer.get("url") == null || indexer.get("secret") == null)
 }
 else
 {
+	indexBody = Map();
+	indexBody.put("repo",owner + "/" + repo);
+	indexBody.put("namespace",namespace);
+	indexBody.put("token",token);
+	indexBody.put("notify",me);
+	if(branch != "")
+	{
+		indexBody.put("ref",branch);
+	}
 	try
 	{
 		indexResp = invokeurl
 		[
 			url :indexer.get("url") + "/index"
+			type :POST
+			parameters:indexBody.toString()
+			headers:{"X-Conduit-Secret":indexer.get("secret"),"Content-Type":"application/json"}
 			detailed:true
 		];
 		indexCode = indexResp.get("responseCode");
 		if(indexCode == 202)
 		{
+			indexState = "In progress";
+			indexNote = "Indexing usually takes 1–2 minutes. Run /repo to check progress.";
+			// Auto re-index is on only if GitHub accepted the webhook.
 			try
 			{
 				indexReply = indexResp.get("responseText").toString().toMap();
@@ -163,6 +295,9 @@ else
 		}
 		else
 		{
+			indexState = "Failed";
+			indexNote = "The indexer returned " + indexCode + ". Try Edit repo.";
+			info indexResp;
 		}
 	}
 	catch (err)
@@ -170,5 +305,18 @@ else
 		indexState = "Failed";
 		indexNote = "The indexer couldn't be reached. Try Edit repo in a minute.";
 	}
+}
+rows = List();
+rows.add({"Project":servicename});
+rows.add({"Repository":owner + "/" + repo});
+if(branch != "")
+{
+	rows.add({"Branch":branch});
+}
+rows.add({"Team lead":leadText});
+rows.add({"Indexing":indexState});
+if(autoText != "")
+{
+	rows.add({"Auto re-index":autoText});
 }
 return {"text":indexNote,"card":{"title":"Repository added","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
