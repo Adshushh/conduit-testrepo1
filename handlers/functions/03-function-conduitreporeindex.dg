@@ -1,0 +1,228 @@
+// conduitreporeindex: the Edit repo form. Changes the branch or token and rebuilds the index in the background.
+values = form.get("values");
+pick = values.get("servicename").get("value").toString();
+servicename = pick;
+branch = "";
+if(pick.contains("~"))
+{
+	servicename = pick.getPrefix("~");
+	branch = pick.getSuffix("~");
+}
+branchWanted = ifnull(values.get("branch"),"").toString().trim();
+if(branchWanted != "")
+{
+	branch = branchWanted;
+}
+token = ifnull(values.get("token"),"").toString().trim();
+teamLead = ifnull(values.get("teamlead"),"").toString().trim().toLowerCase();
+if(teamLead != "" && !teamLead.contains("@"))
+{
+	return {"type":"form_error","text":"The team lead must be a Cliq email.","inputs":{"teamlead":"For example lead@company.com"}};
+}
+me = user.get("email").toLowerCase();
+
+admins = "";
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+if(!admins.toList(",").contains(me))
+{
+	return {"type":"form_error","text":"Only a Conduit admin can re-index a repo."};
+}
+
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+svc = services.get(servicename);
+if(svc == null)
+{
+	return {"type":"form_error","text":"That project no longer exists."};
+}
+owner = svc.get("owner");
+repo = svc.get("repo");
+namespace = svc.get("namespace");
+tokenNote = "";
+
+if(token == "")
+{
+	token = svc.get("token");
+}
+else
+{
+	repoResp = invokeurl
+	[
+		url :"https://api.github.com/repos/" + owner + "/" + repo
+		type :GET
+		headers:{"Authorization":"Bearer " + token,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+		detailed:true
+	];
+	code = repoResp.get("responseCode");
+	if(code != 200)
+	{
+		return {"type":"form_error","text":"That token can't see " + owner + "/" + repo + " (GitHub said " + code + ").","inputs":{"token":"Invalid, expired or wrongly scoped token"}};
+	}
+	svc.put("token",token);
+	tokenNote = "Token updated. ";
+}
+if(branch != "" && branch != ifnull(svc.get("branch"),"").toString())
+{
+	brResp = invokeurl
+	[
+		url :"https://api.github.com/repos/" + owner + "/" + repo + "/branches/" + branch
+		type :GET
+		headers:{"Authorization":"Bearer " + token,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+		detailed:true
+	];
+	if(brResp.get("responseCode") != 200)
+	{
+		return {"type":"form_error","text":"There is no branch called " + branch + " in " + owner + "/" + repo + ".","inputs":{"branch":"Check the branch name, or leave it blank"}};
+	}
+	svc.put("branch",branch);
+	tokenNote = tokenNote + "Branch is now " + branch + ". ";
+}
+if(teamLead != "")
+{
+	svc.put("teamlead",teamLead);
+	tokenNote = tokenNote + "Team lead is now " + teamLead + ". ";
+}
+if(tokenNote != "")
+{
+	services.put(servicename,svc);
+	zoho.cliq.extension.setProperties({"services":services.toString()});
+}
+
+indexer = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("indexer");
+	if(p != null && p.get("indexer") != null)
+	{
+		indexer = p.get("indexer").toMap();
+	}
+}
+catch (err)
+{
+	indexer = Map();
+}
+indexState = "Not started";
+indexNote = "";
+autoText = "";
+if(indexer.get("url") == null || indexer.get("secret") == null)
+{
+	indexNote = "Connect the indexer in Settings, then use Edit repo.";
+}
+else
+{
+	indexBody = Map();
+	indexBody.put("repo",owner + "/" + repo);
+	indexBody.put("namespace",namespace);
+	indexBody.put("token",token);
+	indexBody.put("notify",me);
+	if(ifnull(svc.get("branch"),"").toString() != "")
+	{
+		indexBody.put("ref",svc.get("branch").toString());
+	}
+	try
+	{
+		indexResp = invokeurl
+		[
+			url :indexer.get("url") + "/index"
+			type :POST
+			parameters:indexBody.toString()
+			headers:{"X-Conduit-Secret":indexer.get("secret"),"Content-Type":"application/json"}
+			detailed:true
+		];
+		indexCode = indexResp.get("responseCode");
+		if(indexCode == 202)
+		{
+			indexState = "In progress";
+			indexNote = "Indexing usually takes 1–2 minutes. Run /repo to check progress.";
+			// Auto re-index is on only if GitHub accepted the webhook.
+			try
+			{
+				indexReply = indexResp.get("responseText").toString().toMap();
+				autoInfo = indexReply.get("auto_update");
+				if(autoInfo != null)
+				{
+					if(ifnull(autoInfo.get("state"),"").toString() == "on")
+					{
+						autoText = "On: changed files are re-indexed after every push";
+					}
+					else
+					{
+						autoText = "Off: " + ifnull(autoInfo.get("reason"),"").toString();
+					}
+				}
+			}
+			catch (err)
+			{
+				autoText = "";
+			}
+		}
+		else if(indexCode == 409)
+		{
+			indexState = "In progress";
+			indexNote = "This repository is already being indexed.";
+		}
+		else if(indexCode == 401)
+		{
+			indexState = "Failed";
+			indexNote = "The indexer rejected the secret. Update it in Settings.";
+		}
+		else
+		{
+			indexState = "Failed";
+			indexNote = "The indexer returned " + indexCode + ". Try Edit repo again.";
+			info indexResp;
+		}
+	}
+	catch (err)
+	{
+		indexState = "Failed";
+		indexNote = "The indexer couldn't be reached. Try again in a minute.";
+	}
+}
+leadText = ifnull(svc.get("teamlead"),"").toString();
+if(leadText == "")
+{
+	leadText = "Administrators";
+}
+tokenText = "Unchanged";
+if(tokenNote.contains("Token updated"))
+{
+	tokenText = "Updated";
+}
+rows = List();
+rows.add({"Project":servicename});
+rows.add({"Repository":owner + "/" + repo});
+if(ifnull(svc.get("branch"),"").toString() != "")
+{
+	rows.add({"Branch":svc.get("branch").toString()});
+}
+rows.add({"Team lead":leadText});
+rows.add({"Access token":tokenText});
+rows.add({"Indexing":indexState});
+if(autoText != "")
+{
+	rows.add({"Auto re-index":autoText});
+}
+return {"text":indexNote,"card":{"title":"Repository updated","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
