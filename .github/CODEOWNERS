@@ -1,0 +1,5 @@
+# Conduit test bed owners
+/handlers/commands/ @conduitcliq
+/handlers/functions/24-function-conduitstats.dg @Adshushh
+# team owners are ignored by Conduit
+/handlers/widgets/ @Adshushh/qa-team
