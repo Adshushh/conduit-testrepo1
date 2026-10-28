@@ -1,0 +1,41 @@
+// conduitsweepform: checks the Sweep choice and shows a confirmation card. Nothing is deleted here.
+me = user.get("email").toLowerCase();
+admins = "";
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+if(!pickTickets && !pickRepos && !pickLinks && !pickAdmins)
+{
+	return {"type":"form_error","text":"Choose at least one thing to delete.","inputs":{"items":"Choose at least one"}};
+}
+chosen = List();
+summaryRows = List();
+if(pickTickets)
+{
+	chosen.add("tickets");
+	summaryRows.add({"Tickets":"Every ticket, its routing record and duplicate detection. The Desk widget empties."});
+}
+if(pickLinks)
+{
+	chosen.add("links");
+	summaryRows.add({"Developer links":"Every GitHub to Cliq link."});
+}
+if(pickAdmins)
+{
+	chosen.add("admins");
+	summaryRows.add({"Administrators":"Everyone except you (" + me + ")."});
+}
+sweepButtons = List();
+// a one-time id, so this card can only run its sweep once
+sweepRun = zoho.currenttime.toLong().toString();
+sweepButtons.add({"label":"Sweep now","type":"-","key":"sweep~" + sweepRun + "~" + chosenText,"action":{"type":"invoke.function","data":{"name":"conduitsweepaction"},"confirm":{"title":"Delete these permanently?","description":"This cannot be undone."}}});
+return {"text":"You are about to permanently delete:","card":{"title":"Sweep","theme":"modern-inline"},"slides":{{"type":"label","data":summaryRows}},"buttons":sweepButtons};
