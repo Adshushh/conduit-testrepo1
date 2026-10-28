@@ -13,9 +13,24 @@ catch (err)
 {
 	admins = "";
 }
+if(!admins.toList(",").contains(me))
+{
+	return {"type":"form_error","text":"Only Conduit administrators can use /sweep."};
+}
+values = form.get("values");
+itemsText = ifnull(values.get("items"),"").toString();
+pickTickets = itemsText.contains("sw_tickets");
+pickRepos = itemsText.contains("sw_repos");
+pickLinks = itemsText.contains("sw_links");
+pickAdmins = itemsText.contains("sw_admins");
 if(!pickTickets && !pickRepos && !pickLinks && !pickAdmins)
 {
 	return {"type":"form_error","text":"Choose at least one thing to delete.","inputs":{"items":"Choose at least one"}};
+}
+hasTickets = ifnull(values.get("hastickets"),"yes").toString();
+if(pickRepos && !pickTickets && hasTickets == "yes")
+{
+	return {"type":"form_error","text":"Repositories can only be swept together with Tickets.","inputs":{"items":"Tick Tickets as well, or untick Repositories"}};
 }
 chosen = List();
 summaryRows = List();
@@ -23,6 +38,11 @@ if(pickTickets)
 {
 	chosen.add("tickets");
 	summaryRows.add({"Tickets":"Every ticket, its routing record and duplicate detection. The Desk widget empties."});
+}
+if(pickRepos)
+{
+	chosen.add("repos");
+	summaryRows.add({"Repositories":"Every project, its team lead and branch, and its code index."});
 }
 if(pickLinks)
 {
@@ -33,6 +53,15 @@ if(pickAdmins)
 {
 	chosen.add("admins");
 	summaryRows.add({"Administrators":"Everyone except you (" + me + ")."});
+}
+chosenText = "";
+for each chosenItem in chosen
+{
+	if(chosenText != "")
+	{
+		chosenText = chosenText + ",";
+	}
+	chosenText = chosenText + chosenItem;
 }
 sweepButtons = List();
 // a one-time id, so this card can only run its sweep once
