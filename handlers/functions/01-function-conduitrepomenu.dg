@@ -1,4 +1,7 @@
 // conduitrepomenu: every button on the /repo card, plus link request approvals.
+key = arguments.get("key");
+
+services = Map();
 try
 {
 	p = zoho.cliq.extension.getProperties("services");
@@ -11,10 +14,29 @@ catch (err)
 {
 	services = Map();
 }
+options = List();
+for each svcName in services.keys()
+{
+	options.add({"label":svcName,"value":svcName});
+}
 
 // Approve or Decline on a /link request.
 if(key.startsWith("linkok~") || key.startsWith("linkno~"))
 {
+	me = user.get("email").toLowerCase();
+	admins = "";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("admins");
+		if(p != null && p.get("admins") != null)
+		{
+			admins = p.get("admins").toString().toLowerCase();
+		}
+	}
+	catch (err)
+	{
+		admins = "";
+	}
 	if(!admins.toList(",").contains(me))
 	{
 		return {"text":"Only a Conduit admin can approve link requests."};
@@ -22,6 +44,19 @@ if(key.startsWith("linkok~") || key.startsWith("linkno~"))
 	reqParts = key.toList("~");
 	github = reqParts.get(1);
 	requester = reqParts.get(2);
+	people = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("people");
+		if(p != null && p.get("people") != null)
+		{
+			people = p.get("people").toMap();
+		}
+	}
+	catch (err)
+	{
+		people = Map();
+	}
 	// GitHub names keep the case they were typed in; lookups ignore case
 	existingKey = "";
 	githubLower = github.toLowerCase();
@@ -37,6 +72,15 @@ if(key.startsWith("linkok~") || key.startsWith("linkno~"))
 	{
 		current = people.get(existingKey).toString().toLowerCase();
 	}
+	rows = List();
+	rows.add({"GitHub user":github});
+	rows.add({"Cliq user":requester});
+	// Every admin gets this card. The first decision counts; later clicks just see it.
+	reqId = "";
+	if(reqParts.size() > 3)
+	{
+		reqId = reqParts.get(3);
+	}
 	decisions = Map();
 	try
 	{
@@ -49,6 +93,24 @@ if(key.startsWith("linkok~") || key.startsWith("linkno~"))
 	catch (err)
 	{
 		decisions = Map();
+	}
+	decisionKey = githubLower + "~" + requester + "~" + reqId;
+	pastDecision = ifnull(decisions.get(decisionKey),"").toString();
+	if(pastDecision != "")
+	{
+		rows.add({"Status":pastDecision});
+		return {"type":"message_edit","text":"This request was already handled.","card":{"title":"Link request","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
+	}
+	// Forget decisions older than 30 days.
+	freshDecisions = Map();
+	for each dk in decisions.keys()
+	{
+		dkParts = dk.toList("~");
+		dkTime = dkParts.get(dkParts.size() - 1);
+		if(dkTime.matches("[0-9]{10,14}") && zoho.currenttime.toLong() - dkTime.toLong() < 2592000000)
+		{
+			freshDecisions.put(dk,decisions.get(dk));
+		}
 	}
 	if(current == requester)
 	{
@@ -71,6 +133,19 @@ if(key.startsWith("linkok~") || key.startsWith("linkno~"))
 		}
 		return {"type":"message_edit","text":"Request declined.","card":{"title":"Link request","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
 	}
+	if(existingKey != "")
+	{
+		people.remove(existingKey);
+	}
+	people.put(github,requester);
+	zoho.cliq.extension.setProperties({"people":people.toString()});
+	if(current != "")
+	{
+		rows.add({"Previously":current});
+	}
+	rows.add({"Status":"Approved by " + user.get("first_name")});
+	freshDecisions.put(decisionKey,"Approved by " + user.get("first_name"));
+	zoho.cliq.extension.setProperties({"linkdecisions":freshDecisions.toString()});
 	try
 	{
 		zoho.cliq.postToBot("flux",{"text":"✅ *" + github + "* is now linked to you. Bugs in code by this account will be routed to you.","userids":requester});
@@ -82,6 +157,34 @@ if(key.startsWith("linkok~") || key.startsWith("linkno~"))
 	return {"type":"message_edit","text":"Request approved.","card":{"title":"Link request","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
 }
 
+if(key == "reminders")
+{
+	autoRemind = "off";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("autoremind");
+		if(p != null && p.get("autoremind") != null)
+		{
+			autoRemind = p.get("autoremind").toString();
+		}
+	}
+	catch (err)
+	{
+		autoRemind = "off";
+	}
+	remindButtons = List();
+	if(autoRemind == "on")
+	{
+		remindText = "Automatic reminders are *on*. Developers and team leads are reminded about bugs nobody has acted on.";
+		remindButtons.add({"label":"Turn off","type":"-","key":"remindoff","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	}
+	else
+	{
+		remindText = "Automatic reminders are *off*.";
+		remindButtons.add({"label":"Turn on","type":"+","key":"remindon","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"},"confirm":{"title":"Turn on reminders","description":"Conduit will remind developers and team leads about bugs nobody has acted on.","input":{"type":"user_webhook_token"}}}});
+	}
+	return {"text":remindText,"card":{"title":"Reminders","theme":"modern-inline"},"buttons":remindButtons};
+}
 
 // Reminders: give the indexer a token so it can ping this workspace.
 if(key == "remindon" || key == "remindoff")
@@ -104,6 +207,19 @@ if(key == "remindon" || key == "remindoff")
 	{
 		return {"type":"banner","text":"Only Conduit administrators can change reminders.","status":"failure"};
 	}
+	indexer = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("indexer");
+		if(p != null && p.get("indexer") != null)
+		{
+			indexer = p.get("indexer").toMap();
+		}
+	}
+	catch (err)
+	{
+		indexer = Map();
+	}
 	if(indexer.get("url") == null || indexer.get("secret") == null)
 	{
 		return {"type":"banner","text":"The indexer isn't connected yet. Run /repo again.","status":"failure"};
@@ -122,15 +238,38 @@ if(key == "remindon" || key == "remindoff")
 	{
 		autoRemind = "off";
 	}
+	idxHeaders = Map();
+	idxHeaders.put("X-Conduit-Secret",indexer.get("secret").toString());
+	idxHeaders.put("Content-Type","application/json");
+	idxUrl = indexer.get("url").toString();
+	if(key == "remindon" && autoRemind == "on")
+	{
+		return {"type":"banner","text":"Automatic reminders are already on.","status":"success"};
+	}
 	if(key == "remindoff" && autoRemind != "on")
 	{
 		return {"type":"banner","text":"Automatic reminders are already off.","status":"success"};
+	}
+	if(key == "remindoff")
+	{
+		discResp = postUrl(idxUrl + "/reminders/disconnect","{}",idxHeaders,false);
+		zoho.cliq.extension.setProperties({"autoremind":"off"});
+		return {"type":"banner","text":"Automatic reminders are off.","status":"success"};
 	}
 	// The Marketplace incoming webhook URL, from My Extensions -> Conduit -> Connectors.
 	endpoint = "https://cliq.zoho.com/api/v2/applications/8855/incoming?appkey=PASTE_APP_KEY";
 	if(endpoint.contains("PASTE_"))
 	{
 		return {"type":"banner","text":"Reminders aren't configured in this version of Conduit yet.","status":"failure"};
+	}
+	token = "";
+	try
+	{
+		token = ifnull(arguments.get("input").get("token"),"").toString();
+	}
+	catch (err)
+	{
+		token = "";
 	}
 	if(token == "")
 	{
@@ -139,12 +278,36 @@ if(key == "remindon" || key == "remindoff")
 	connBody = Map();
 	connBody.put("endpoint",endpoint);
 	connBody.put("token",token);
+	connected = false;
+	connJson = connBody.toString();
+	connResp = postUrl(idxUrl + "/reminders/connect",connJson,idxHeaders,false);
 	if(connResp.get("responseCode") == 200)
 	{
 		connected = true;
 	}
+	if(!connected)
+	{
+		return {"type":"banner","text":"Couldn't turn on reminders. Try again in a minute.","status":"failure"};
+	}
 	zoho.cliq.extension.setProperties({"autoremind":"on"});
 	return {"type":"banner","text":"Automatic reminders are on.","status":"success"};
+}
+if(key == "create")
+{
+	inputs = List();
+	inputs.add({"label":"Project name","name":"servicename","type":"text","placeholder":"payments-api","mandatory":true});
+	inputs.add({"label":"Repository","name":"repo","type":"text","placeholder":"owner/repository","mandatory":true});
+	inputs.add({"label":"Branch","name":"branch","type":"text","placeholder":"Leave blank for the default branch","mandatory":false});
+	inputs.add({"label":"Access token","name":"token","type":"text","placeholder":"github_pat_…","mandatory":true});
+	leadPick = Map();
+	leadPick.put("label","Team lead");
+	leadPick.put("name","teamlead");
+	leadPick.put("type","native_select");
+	leadPick.put("data_source","contacts");
+	leadPick.put("placeholder","Choose a member of this organization");
+	leadPick.put("mandatory",true);
+	inputs.add(leadPick);
+	return {"type":"form","title":"Add repository","name":"conduitrepoadd","button_label":"Add","inputs":inputs,"action":{"type":"invoke.function","name":"conduitrepoadd"}};
 }
 if(key == "edit")
 {
@@ -166,6 +329,20 @@ if(key == "edit")
 // Teams: each project with its team lead and members. Members only decide what Conduit stats shows.
 if(key == "teams" || key == "membersadd" || key == "membersremove")
 {
+	teamMe = user.get("email").toLowerCase();
+	teamAdmins = "";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("admins");
+		if(p != null && p.get("admins") != null)
+		{
+			teamAdmins = p.get("admins").toString().toLowerCase();
+		}
+	}
+	catch (err)
+	{
+		teamAdmins = "";
+	}
 	teamAdminList = teamAdmins.toList(",");
 	if(!teamAdminList.contains(teamMe))
 	{
@@ -198,14 +375,74 @@ if(key == "teams" || key == "membersadd" || key == "membersremove")
 	}
 	if(key == "membersremove")
 	{
+		removeChoices = List();
+		removeMap = Map();
+		removeNo = 0;
+		for each teamProjectName in services.keys()
+		{
+			teamSvc = services.get(teamProjectName);
+			teamMembersText = ifnull(teamSvc.get("members"),"").toString();
+			teamMemberList = teamMembersText.toList(",");
+			for each teamMemberItem in teamMemberList
+			{
+				teamMemberEmail = teamMemberItem.trim();
+				if(teamMemberEmail != "" && removeNo < 40)
+				{
+					removeNo = removeNo + 1;
+					removeId = "mem_" + removeNo.toString();
+					if(removeNo < 10)
+					{
+						removeId = "mem_0" + removeNo.toString();
+					}
+					removeChoices.add({"label":teamProjectName + " · " + teamMemberEmail,"value":removeId});
+					removeMap.put(removeId,teamProjectName + "|" + teamMemberEmail);
+				}
+			}
+		}
 		if(removeChoices.size() == 0)
 		{
 			return {"text":"No project has members yet."};
 		}
+		removeInput = Map();
+		removeInput.put("type","checkbox");
+		removeInput.put("name","members");
 		removeInput.put("label","Remove");
 		removeInput.put("mandatory",true);
 		removeInput.put("options",removeChoices);
+		inputs = List();
+		inputs.add(removeInput);
+		inputs.add({"type":"hidden","name":"memberkeys","value":removeMap.toString()});
 		return {"type":"form","title":"Remove members","name":"membersremove","button_label":"Remove","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
+	teamRows = List();
+	for each teamProjectName in services.keys()
+	{
+		teamSvc = services.get(teamProjectName);
+		teamLeadNow = ifnull(teamSvc.get("teamlead"),"").toString();
+		if(teamLeadNow == "")
+		{
+			teamLeadNow = "Not set";
+		}
+		teamMembersText = ifnull(teamSvc.get("members"),"").toString();
+		teamMemberCount = 0;
+		teamMemberList = teamMembersText.toList(",");
+		for each teamMemberItem in teamMemberList
+		{
+			if(teamMemberItem.trim() != "")
+			{
+				teamMemberCount = teamMemberCount + 1;
+			}
+		}
+		teamMembersShown = teamMembersText.replaceAll(",",", ");
+		if(teamMemberCount == 0)
+		{
+			teamMembersShown = "None yet";
+		}
+		if(teamMembersShown.length() > 160)
+		{
+			teamMembersShown = teamMembersShown.subString(0,159) + "…";
+		}
+		teamRows.add({"Project":teamProjectName,"Team lead":teamLeadNow,"Members":teamMembersShown});
 	}
 	teamButtons = List();
 	teamButtons.add({"label":"Team leads","type":"+","key":"teamleads","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
@@ -250,8 +487,31 @@ if(key == "teamleads")
 	inputs.add({"type":"hidden","name":"leadorder","value":leadOrder});
 	return {"type":"form","title":"Team leads","name":"teamleads","button_label":"Save","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
 }
+if(key == "delete")
+{
+	if(options.size() == 0)
+	{
+		return {"text":"No repositories connected."};
+	}
+	inputs = List();
+	inputs.add({"label":"Project","name":"servicename","type":"select","placeholder":"Select a project","mandatory":true,"options":options});
+	return {"type":"form","title":"Remove repository","name":"conduitreporemove","button_label":"Remove","inputs":inputs,"action":{"type":"invoke.function","name":"conduitreporemove"}};
+}
 if(key == "settings")
 {
+	admins = "";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("admins");
+		if(p != null && p.get("admins") != null)
+		{
+			admins = p.get("admins").toString();
+		}
+	}
+	catch (err)
+	{
+		admins = "";
+	}
 	indexer = Map();
 	try
 	{
@@ -264,6 +524,23 @@ if(key == "settings")
 	catch (err)
 	{
 		indexer = Map();
+	}
+	remindNow = "4";
+	confidenceNow = "60";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("routing");
+		if(p != null && p.get("routing") != null)
+		{
+			routingNow = p.get("routing").toMap();
+			remindNow = ifnull(routingNow.get("remindhours"),"4").toString();
+			confidenceNow = ifnull(routingNow.get("minconfidence"),"60").toString();
+		}
+	}
+	catch (err)
+	{
+		remindNow = "4";
+		confidenceNow = "60";
 	}
 	urlInput = {"label":"Indexer URL","name":"indexerurl","type":"text","placeholder":"https://indexer.example.com","mandatory":false};
 	if(indexer.get("url") != null)
@@ -278,21 +555,44 @@ if(key == "settings")
 	inputs = List();
 	inputs.add(urlInput);
 	inputs.add({"label":"Indexer secret","name":"indexersecret","type":"text","placeholder":secretHint,"mandatory":false});
+	inputs.add({"label":"Reminder interval (hours)","name":"remindhours","type":"text","placeholder":"4","mandatory":true,"value":remindNow});
+	confidenceInput = Map();
+	confidenceInput.put("label","Minimum routing confidence (%)");
 	confidenceInput.put("name","minconfidence");
 	confidenceInput.put("type","text");
 	confidenceInput.put("placeholder","60");
+	confidenceInput.put("hint","Below this, the team lead chooses the owner");
+	confidenceInput.put("mandatory",true);
+	confidenceInput.put("value",confidenceNow);
 	inputs.add(confidenceInput);
 	me = user.get("email").toLowerCase();
 	adminsLower = admins.toLowerCase();
+	adminList = adminsLower.toList(",");
+	adminHint = "Current: " + admins.replaceAll(",",", ");
+	if(adminHint.length() > 95)
+	{
+		adminHint = adminHint.subString(0,94) + "…";
+	}
 	pickInput = Map();
 	pickInput.put("label","Add administrators");
 	pickInput.put("name","addadmins");
 	pickInput.put("type","native_select");
 	pickInput.put("data_source","contacts");
 	pickInput.put("multiple",true);
+	pickInput.put("max_selections",10);
+	pickInput.put("placeholder","Choose people");
+	pickInput.put("hint",adminHint);
 	pickInput.put("mandatory",false);
 	inputs.add(pickInput);
 	removeOptions = List();
+	for each adminItem in adminList
+	{
+		adminEmail = adminItem.trim();
+		if(adminEmail != "" && adminEmail != me)
+		{
+			removeOptions.add({"label":adminEmail,"value":adminEmail});
+		}
+	}
 	if(removeOptions.size() > 0)
 	{
 		inputs.add({"label":"Remove an administrator","name":"removeadmin","type":"select","placeholder":"Choose an administrator","mandatory":false,"options":removeOptions});
@@ -301,6 +601,19 @@ if(key == "settings")
 }
 if(key == "people" || key == "peoplelink" || key == "peopleunlink" || key == "peoplerestore")
 {
+	people = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("people");
+		if(p != null && p.get("people") != null)
+		{
+			people = p.get("people").toMap();
+		}
+	}
+	catch (err)
+	{
+		people = Map();
+	}
 	// People who left the organization, unlinked by the daily check. Restore brings them back.
 	peopleLeft = Map();
 	try
@@ -314,6 +627,22 @@ if(key == "people" || key == "peoplelink" || key == "peopleunlink" || key == "pe
 	catch (err)
 	{
 		peopleLeft = Map();
+	}
+	if(key == "peoplerestore")
+	{
+		if(peopleLeft.size() == 0)
+		{
+			return {"text":"Nobody is marked as having left."};
+		}
+		leftOptions = List();
+		for each leftGh in peopleLeft.keys()
+		{
+			leftItem = peopleLeft.get(leftGh).toString().toMap();
+			leftOptions.add({"label":leftGh + " → " + ifnull(leftItem.get("email"),"").toString(),"value":leftGh});
+		}
+		inputs = List();
+		inputs.add({"label":"Developer","name":"github","type":"select","placeholder":"Select a developer","mandatory":true,"options":leftOptions});
+		return {"type":"form","title":"Restore developer","name":"restoredev","hint":"Brings back their GitHub links and project memberships. They must be an active member of this organization.","button_label":"Restore","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
 	}
 	if(key == "peoplelink")
 	{
@@ -329,6 +658,21 @@ if(key == "people" || key == "peoplelink" || key == "peopleunlink" || key == "pe
 		inputs.add(personInput);
 		return {"type":"form","title":"Link developer","name":"linkdev","button_label":"Link","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
 	}
+	if(key == "peopleunlink")
+	{
+		if(people.size() == 0)
+		{
+			return {"text":"No developers are linked."};
+		}
+		devOptions = List();
+		for each gh in people.keys()
+		{
+			devOptions.add({"label":gh + " → " + people.get(gh),"value":gh});
+		}
+		inputs = List();
+		inputs.add({"label":"Developer","name":"github","type":"select","placeholder":"Select a developer","mandatory":true,"options":devOptions});
+		return {"type":"form","title":"Unlink developer","name":"unlinkdev","button_label":"Unlink","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
 	devButtons = List();
 	devButtons.add({"label":"Link developer","type":"+","key":"peoplelink","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
 	devButtons.add({"label":"Unlink developer","type":"-","key":"peopleunlink","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
@@ -343,10 +687,18 @@ if(key == "people" || key == "peoplelink" || key == "peopleunlink" || key == "pe
 	{
 		devButtons.add({"label":"Restore developer","type":"+","key":"peoplerestore","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
 	}
+	if(people.size() == 0 && leftRows.size() == 0)
+	{
+		return {"text":"No developers linked.","card":{"title":"Developers","theme":"modern-inline"},"buttons":devButtons};
+	}
 	devRows = List();
 	for each gh in people.keys()
 	{
 		devRows.add({"GitHub user":gh,"Cliq user":people.get(gh)});
+	}
+	if(devRows.size() > 0)
+	{
+		devSlides.add({"type":"table","title":"Linked","data":{"headers":{"GitHub user","Cliq user"},"rows":devRows}});
 	}
 	if(leftRows.size() > 0)
 	{
