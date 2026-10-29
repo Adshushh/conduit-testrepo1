@@ -1,0 +1,357 @@
+// conduitrepomenu: every button on the /repo card, plus link request approvals.
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+
+// Approve or Decline on a /link request.
+if(key.startsWith("linkok~") || key.startsWith("linkno~"))
+{
+	if(!admins.toList(",").contains(me))
+	{
+		return {"text":"Only a Conduit admin can approve link requests."};
+	}
+	reqParts = key.toList("~");
+	github = reqParts.get(1);
+	requester = reqParts.get(2);
+	// GitHub names keep the case they were typed in; lookups ignore case
+	existingKey = "";
+	githubLower = github.toLowerCase();
+	for each gk in people.keys()
+	{
+		if(gk.toLowerCase() == githubLower)
+		{
+			existingKey = gk;
+		}
+	}
+	current = "";
+	if(existingKey != "")
+	{
+		current = people.get(existingKey).toString().toLowerCase();
+	}
+	decisions = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("linkdecisions");
+		if(p != null && p.get("linkdecisions") != null)
+		{
+			decisions = p.get("linkdecisions").toMap();
+		}
+	}
+	catch (err)
+	{
+		decisions = Map();
+	}
+	if(current == requester)
+	{
+		// another admin got here first
+		rows.add({"Status":"Already linked"});
+		return {"type":"message_edit","text":"This request was already approved.","card":{"title":"Link request","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
+	}
+	if(reqParts.get(0) == "linkno")
+	{
+		rows.add({"Status":"Declined by " + user.get("first_name")});
+		freshDecisions.put(decisionKey,"Declined by " + user.get("first_name"));
+		zoho.cliq.extension.setProperties({"linkdecisions":freshDecisions.toString()});
+		try
+		{
+			zoho.cliq.postToBot("flux",{"text":"Your request to link *" + github + "* wasn't approved. Ask a Conduit admin if you think it should be.","userids":requester});
+		}
+		catch (err)
+		{
+			info "could not notify the requester";
+		}
+		return {"type":"message_edit","text":"Request declined.","card":{"title":"Link request","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
+	}
+	try
+	{
+		zoho.cliq.postToBot("flux",{"text":"✅ *" + github + "* is now linked to you. Bugs in code by this account will be routed to you.","userids":requester});
+	}
+	catch (err)
+	{
+		info "could not notify the requester";
+	}
+	return {"type":"message_edit","text":"Request approved.","card":{"title":"Link request","theme":"modern-inline"},"slides":{{"type":"label","data":rows}}};
+}
+
+
+// Reminders: give the indexer a token so it can ping this workspace.
+if(key == "remindon" || key == "remindoff")
+{
+	me = user.get("email").toLowerCase();
+	admins = "";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("admins");
+		if(p != null && p.get("admins") != null)
+		{
+			admins = p.get("admins").toString().toLowerCase();
+		}
+	}
+	catch (err)
+	{
+		admins = "";
+	}
+	if(!admins.toList(",").contains(me))
+	{
+		return {"type":"banner","text":"Only Conduit administrators can change reminders.","status":"failure"};
+	}
+	if(indexer.get("url") == null || indexer.get("secret") == null)
+	{
+		return {"type":"banner","text":"The indexer isn't connected yet. Run /repo again.","status":"failure"};
+	}
+	// a button on an older card: report the current state instead of acting twice
+	autoRemind = "off";
+	try
+	{
+		p = zoho.cliq.extension.getProperties("autoremind");
+		if(p != null && p.get("autoremind") != null)
+		{
+			autoRemind = p.get("autoremind").toString();
+		}
+	}
+	catch (err)
+	{
+		autoRemind = "off";
+	}
+	if(key == "remindoff" && autoRemind != "on")
+	{
+		return {"type":"banner","text":"Automatic reminders are already off.","status":"success"};
+	}
+	// The Marketplace incoming webhook URL, from My Extensions -> Conduit -> Connectors.
+	endpoint = "https://cliq.zoho.com/api/v2/applications/8855/incoming?appkey=PASTE_APP_KEY";
+	if(endpoint.contains("PASTE_"))
+	{
+		return {"type":"banner","text":"Reminders aren't configured in this version of Conduit yet.","status":"failure"};
+	}
+	if(token == "")
+	{
+		return {"type":"banner","text":"No token was created. Try again.","status":"failure"};
+	}
+	connBody = Map();
+	connBody.put("endpoint",endpoint);
+	connBody.put("token",token);
+	if(connResp.get("responseCode") == 200)
+	{
+		connected = true;
+	}
+	zoho.cliq.extension.setProperties({"autoremind":"on"});
+	return {"type":"banner","text":"Automatic reminders are on.","status":"success"};
+}
+if(key == "edit")
+{
+	if(options.size() == 0)
+	{
+		return {"text":"No repositories connected."};
+	}
+	projectInput = {"label":"Project","name":"servicename","type":"select","placeholder":"Select a project","mandatory":true,"options":options};
+	if(options.size() == 1)
+	{
+		projectInput.put("value",options.get(0).get("value"));
+	}
+	inputs = List();
+	inputs.add(projectInput);
+	inputs.add({"label":"Branch","name":"branch","type":"text","placeholder":"Leave blank to keep the current branch","mandatory":false});
+	inputs.add({"label":"Access token","name":"token","type":"text","placeholder":"Unchanged","mandatory":false});
+	return {"type":"form","title":"Edit repository","name":"conduitreporeindex","hint":"Change the branch or token. The index is rebuilt in the background and bugs keep routing meanwhile.","button_label":"Save and rebuild","inputs":inputs,"action":{"type":"invoke.function","name":"conduitreporeindex"}};
+}
+// Teams: each project with its team lead and members. Members only decide what Conduit stats shows.
+if(key == "teams" || key == "membersadd" || key == "membersremove")
+{
+	teamAdminList = teamAdmins.toList(",");
+	if(!teamAdminList.contains(teamMe))
+	{
+		return {"text":"Only a Conduit admin can change teams."};
+	}
+	if(options.size() == 0)
+	{
+		return {"text":"No repositories connected."};
+	}
+	if(key == "membersadd")
+	{
+		inputs = List();
+		teamProject = {"label":"Project","name":"servicename","type":"select","placeholder":"Select a project","mandatory":true,"options":options};
+		if(options.size() == 1)
+		{
+			teamProject.put("value",options.get(0).get("value"));
+		}
+		inputs.add(teamProject);
+		memberPick = Map();
+		memberPick.put("label","Members to add");
+		memberPick.put("name","addmembers");
+		memberPick.put("type","native_select");
+		memberPick.put("data_source","contacts");
+		memberPick.put("multiple",true);
+		memberPick.put("max_selections",20);
+		memberPick.put("placeholder","Choose people");
+		memberPick.put("mandatory",true);
+		inputs.add(memberPick);
+		return {"type":"form","title":"Add members","name":"membersadd","hint":"Members decide whose numbers team leads see in Conduit stats. Routing is not affected.","button_label":"Add","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
+	if(key == "membersremove")
+	{
+		if(removeChoices.size() == 0)
+		{
+			return {"text":"No project has members yet."};
+		}
+		removeInput.put("label","Remove");
+		removeInput.put("mandatory",true);
+		removeInput.put("options",removeChoices);
+		return {"type":"form","title":"Remove members","name":"membersremove","button_label":"Remove","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
+	teamButtons = List();
+	teamButtons.add({"label":"Team leads","type":"+","key":"teamleads","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	teamButtons.add({"label":"Add members","type":"+","key":"membersadd","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	teamButtons.add({"label":"Remove members","type":"-","key":"membersremove","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	return {"text":"Team leads get bugs nobody owns. Members decide whose numbers team leads see in Conduit stats.","card":{"title":"Teams","theme":"modern-inline"},"slides":{{"type":"table","data":{"headers":{"Project","Team lead","Members"},"rows":teamRows}}},"buttons":teamButtons};
+}
+if(key == "teamleads")
+{
+	if(options.size() == 0)
+	{
+		return {"text":"No repositories connected."};
+	}
+	inputs = List();
+	leadOrder = "";
+	leadCount = 0;
+	for each leadProject in services.keys()
+	{
+		if(leadCount < 20)
+		{
+			leadCount = leadCount + 1;
+			leadSvc = services.get(leadProject);
+			leadNow = ifnull(leadSvc.get("teamlead"),"").toString();
+			leadInput = Map();
+			leadInput.put("label",leadProject);
+			leadInput.put("name","lead" + leadCount.toString());
+			leadInput.put("type","text");
+			leadInput.put("placeholder","lead@company.com");
+			leadInput.put("mandatory",true);
+			if(leadNow != "")
+			{
+				leadInput.put("value",leadNow);
+			}
+			inputs.add(leadInput);
+			if(leadOrder != "")
+			{
+				leadOrder = leadOrder + ",";
+			}
+			leadOrder = leadOrder + leadProject;
+		}
+	}
+	inputs.add({"type":"hidden","name":"leadorder","value":leadOrder});
+	return {"type":"form","title":"Team leads","name":"teamleads","button_label":"Save","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+}
+if(key == "settings")
+{
+	indexer = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("indexer");
+		if(p != null && p.get("indexer") != null)
+		{
+			indexer = p.get("indexer").toMap();
+		}
+	}
+	catch (err)
+	{
+		indexer = Map();
+	}
+	urlInput = {"label":"Indexer URL","name":"indexerurl","type":"text","placeholder":"https://indexer.example.com","mandatory":false};
+	if(indexer.get("url") != null)
+	{
+		urlInput.put("value",indexer.get("url"));
+	}
+	secretHint = "Shared secret";
+	if(indexer.get("secret") != null)
+	{
+		secretHint = "••••••••";
+	}
+	inputs = List();
+	inputs.add(urlInput);
+	inputs.add({"label":"Indexer secret","name":"indexersecret","type":"text","placeholder":secretHint,"mandatory":false});
+	confidenceInput.put("name","minconfidence");
+	confidenceInput.put("type","text");
+	confidenceInput.put("placeholder","60");
+	inputs.add(confidenceInput);
+	me = user.get("email").toLowerCase();
+	adminsLower = admins.toLowerCase();
+	pickInput = Map();
+	pickInput.put("label","Add administrators");
+	pickInput.put("name","addadmins");
+	pickInput.put("type","native_select");
+	pickInput.put("data_source","contacts");
+	pickInput.put("multiple",true);
+	pickInput.put("mandatory",false);
+	inputs.add(pickInput);
+	removeOptions = List();
+	if(removeOptions.size() > 0)
+	{
+		inputs.add({"label":"Remove an administrator","name":"removeadmin","type":"select","placeholder":"Choose an administrator","mandatory":false,"options":removeOptions});
+	}
+	return {"type":"form","title":"Settings","name":"settings","button_label":"Save","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+}
+if(key == "people" || key == "peoplelink" || key == "peopleunlink" || key == "peoplerestore")
+{
+	// People who left the organization, unlinked by the daily check. Restore brings them back.
+	peopleLeft = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("peopleleft");
+		if(p != null && p.get("peopleleft") != null)
+		{
+			peopleLeft = p.get("peopleleft").toMap();
+		}
+	}
+	catch (err)
+	{
+		peopleLeft = Map();
+	}
+	if(key == "peoplelink")
+	{
+		inputs = List();
+		inputs.add({"label":"GitHub user","name":"github","type":"text","placeholder":"Username or commit email","mandatory":true});
+		personInput = Map();
+		personInput.put("label","Cliq user");
+		personInput.put("name","email");
+		personInput.put("type","native_select");
+		personInput.put("data_source","contacts");
+		personInput.put("placeholder","Choose a member of this organization");
+		personInput.put("mandatory",true);
+		inputs.add(personInput);
+		return {"type":"form","title":"Link developer","name":"linkdev","button_label":"Link","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
+	devButtons = List();
+	devButtons.add({"label":"Link developer","type":"+","key":"peoplelink","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	devButtons.add({"label":"Unlink developer","type":"-","key":"peopleunlink","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	devSlides = List();
+	leftRows = List();
+	for each leftGh in peopleLeft.keys()
+	{
+		leftItem = peopleLeft.get(leftGh).toString().toMap();
+		leftRows.add({"GitHub user":leftGh,"Cliq user":ifnull(leftItem.get("email"),"").toString(),"Since":ifnull(leftItem.get("when"),"").toString()});
+	}
+	if(leftRows.size() > 0)
+	{
+		devButtons.add({"label":"Restore developer","type":"+","key":"peoplerestore","action":{"type":"invoke.function","data":{"name":"conduitrepomenu"}}});
+	}
+	devRows = List();
+	for each gh in people.keys()
+	{
+		devRows.add({"GitHub user":gh,"Cliq user":people.get(gh)});
+	}
+	if(leftRows.size() > 0)
+	{
+		devSlides.add({"type":"table","title":"Left the org","data":{"headers":{"GitHub user","Cliq user","Since"},"rows":leftRows}});
+	}
+	return {"text":people.size().toString() + " linked","card":{"title":"Developers","theme":"modern-inline"},"slides":devSlides,"buttons":devButtons};
+}
+return {"text":"Unknown option."};
