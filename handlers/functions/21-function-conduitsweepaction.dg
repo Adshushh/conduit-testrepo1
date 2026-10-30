@@ -6,8 +6,8 @@ try
 	p = zoho.cliq.extension.getProperties("admins");
 	if(p != null && p.get("admins") != null)
 	{
-		admins = p.get("admins").toString().toLowerCase();  
-	}  
+		admins = p.get("admins").toString().toLowerCase();
+	}
 }
 catch (err)
 {
@@ -16,8 +16,8 @@ catch (err)
 if(!admins.toList(",").contains(me))
 {
 	return {"type":"banner","text":"Only Conduit administrators can sweep.","status":"failure"};
-}  
-key = arguments.get("key").toString();  
+}
+key = arguments.get("key").toString();
 // key: sweep~<one-time id>~tickets,repos,links,admins
 keyParts = key.toList("~");
 sweepRun = "";
@@ -26,8 +26,8 @@ if(keyParts.size() >= 3)
 {
 	sweepRun = keyParts.get(1).toString();
 	chosenText = keyParts.get(2).toString();
-}  
-if(sweepRun == "")  
+}
+if(sweepRun == "")
 {
 	return {"type":"banner","text":"This sweep card is out of date. Run /sweep again.","status":"failure"};
 }
@@ -36,8 +36,8 @@ lastRun = "";
 try
 {
 	p = zoho.cliq.extension.getProperties("lastsweep");
-	if(p != null && p.get("lastsweep") != null)  
-	{  
+	if(p != null && p.get("lastsweep") != null)
+	{
 		lastRun = p.get("lastsweep").toString();
 	}
 }
@@ -46,8 +46,8 @@ catch (err)
 	lastRun = "";
 }
 if(lastRun.toList(",").contains(sweepRun))
-{  
-	return {"type":"banner","text":"This sweep was already done. Run /sweep again to delete more.","status":"success"};  
+{
+	return {"type":"banner","text":"This sweep was already done. Run /sweep again to delete more.","status":"success"};
 }
 doneRuns = sweepRun;
 if(lastRun != "")
@@ -56,8 +56,8 @@ if(lastRun != "")
 }
 if(doneRuns.length() > 300)
 {
-	doneRuns = doneRuns.subString(0,300);  
-}  
+	doneRuns = doneRuns.subString(0,300);
+}
 zoho.cliq.extension.setProperties({"lastsweep":doneRuns});
 chosen = chosenText.toList(",");
 doTickets = chosen.contains("tickets");
@@ -66,8 +66,8 @@ doLinks = chosen.contains("links");
 doAdmins = chosen.contains("admins");
 services = Map();
 try
-{  
-	p = zoho.cliq.extension.getProperties("services");  
+{
+	p = zoho.cliq.extension.getProperties("services");
 	if(p != null && p.get("services") != null)
 	{
 		services = p.get("services").toMap();
@@ -76,8 +76,8 @@ try
 catch (err)
 {
 	services = Map();
-}  
-indexer = Map();  
+}
+indexer = Map();
 try
 {
 	p = zoho.cliq.extension.getProperties("indexer");
@@ -86,8 +86,8 @@ try
 		indexer = p.get("indexer").toMap();
 	}
 }
-catch (err)  
-{  
+catch (err)
+{
 	indexer = Map();
 }
 indexerReady = indexer.get("url") != null && indexer.get("secret") != null;
@@ -96,8 +96,8 @@ idxUrl = "";
 if(indexerReady)
 {
 	idxHeaders.put("X-Conduit-Secret",indexer.get("secret").toString());
-	idxHeaders.put("Content-Type","application/json");  
-	idxUrl = indexer.get("url").toString();  
+	idxHeaders.put("Content-Type","application/json");
+	idxUrl = indexer.get("url").toString();
 }
 resultRows = List();
 problems = "";
@@ -106,8 +106,8 @@ problems = "";
 if(doTickets)
 {
 	sweepStatuses = {"Open","In progress","Needs info","Fixed","Closed","Won't fix","Draft","Merged"};
-	sweepRounds = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};  
-	ticketsDeleted = 0;  
+	sweepRounds = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
+	ticketsDeleted = 0;
 	routesDeleted = 0;
 	for each sweepStatus in sweepStatuses
 	{
@@ -116,8 +116,8 @@ if(doTickets)
 		for each sweepRound in sweepRounds
 		{
 			if(sweepMore)
-			{  
-				sweepResp = zoho.cliq.getRecords("conduittickets",{"criteria":"status==" + sweepStatus,"limit":100});  
+			{
+				sweepResp = zoho.cliq.getRecords("conduittickets",{"criteria":"status==" + sweepStatus,"limit":100});
 				sweepMore = false;
 				if(sweepResp.get("status") != null && sweepResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
 				{
@@ -126,8 +126,8 @@ if(doTickets)
 						sweepId = sweepRec.get("id").toString();
 						routeResp = zoho.cliq.getRecords("conduitroutes",{"criteria":"ticketrec==" + sweepId});
 						if(routeResp.get("status") != null && routeResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
-						{  
-							for each routeRec in routeResp.get("list")  
+						{
+							for each routeRec in routeResp.get("list")
 							{
 								zoho.cliq.deleteRecord("conduitroutes",routeRec.get("id").toString());
 								routesDeleted = routesDeleted + 1;
@@ -136,8 +136,8 @@ if(doTickets)
 						zoho.cliq.deleteRecord("conduittickets",sweepId);
 						ticketsDeleted = ticketsDeleted + 1;
 						sweepMore = true;
-					}  
-				}  
+					}
+				}
 			}
 		}
 	}
@@ -146,8 +146,8 @@ if(doTickets)
 	// duplicate detection memory; when repositories go too, removing them clears it
 	if(!doRepos && indexerReady)
 	{
-		clearedCount = 0;  
-		for each clearProject in services.keys()  
+		clearedCount = 0;
+		for each clearProject in services.keys()
 		{
 			clearSvc = services.get(clearProject);
 			clearBody = Map();
@@ -156,8 +156,8 @@ if(doTickets)
 			clearResp = postUrl(idxUrl + "/tickets/clear",clearJson,idxHeaders,false);
 			clearCode = clearResp.get("responseCode").toString();
 			if(clearCode == "200")
-			{  
-				clearedCount = clearedCount + 1;  
+			{
+				clearedCount = clearedCount + 1;
 			}
 			else
 			{
@@ -166,7 +166,7 @@ if(doTickets)
 		}
 		resultRows.add({"Duplicate detection reset":clearedCount.toString() + " of " + services.size().toString() + " projects"});
 	}
-}  
+}
 
 if(doRepos)
 {
@@ -176,8 +176,8 @@ if(doRepos)
 		if(indexerReady)
 		{
 			repoSvc = services.get(repoProject);
-			forgetBody = Map();  
-			forgetBody.put("namespace",ifnull(repoSvc.get("namespace"),"").toString());  
+			forgetBody = Map();
+			forgetBody.put("namespace",ifnull(repoSvc.get("namespace"),"").toString());
 			forgetJson = forgetBody.toString();
 			forgetResp = postUrl(idxUrl + "/forget",forgetJson,idxHeaders,false);
 			forgetCode = forgetResp.get("responseCode").toString();
@@ -186,8 +186,8 @@ if(doRepos)
 				problems = problems + "The code index of " + repoProject + " was not removed (" + forgetCode + "). ";
 			}
 		}
-		reposRemoved = reposRemoved + 1;  
-	}  
+		reposRemoved = reposRemoved + 1;
+	}
 	emptyServices = Map();
 	zoho.cliq.extension.setProperties({"services":emptyServices.toString()});
 	resultRows.add({"Repositories removed":reposRemoved.toString()});
@@ -196,8 +196,8 @@ if(doRepos)
 if(doLinks)
 {
 	people = Map();
-	try  
-	{  
+	try
+	{
 		p = zoho.cliq.extension.getProperties("people");
 		if(p != null && p.get("people") != null)
 		{
@@ -206,8 +206,8 @@ if(doLinks)
 	}
 	catch (err)
 	{
-		people = Map();  
-	}  
+		people = Map();
+	}
 	linksRemoved = people.size();
 	emptyPeople = Map();
 	zoho.cliq.extension.setProperties({"people":emptyPeople.toString(),"peopleleft":emptyPeople.toString(),"leftcheck":emptyPeople.toString()});
@@ -216,8 +216,8 @@ if(doLinks)
 
 // Admins: only the person sweeping stays.
 if(doAdmins)
-{  
-	adminsRemoved = admins.toList(",").size() - 1;  
+{
+	adminsRemoved = admins.toList(",").size() - 1;
 	zoho.cliq.extension.setProperties({"admins":me});
 	resultRows.add({"Administrators removed":adminsRemoved.toString()});
 }
@@ -226,8 +226,8 @@ doneText = "Sweep finished.";
 if(problems != "")
 {
 	doneText = doneText + " " + problems;
-}  
-if(doTickets)  
+}
+if(doTickets)
 {
 	doneText = doneText + " Old ticket cards in Flux no longer work.";
 }
