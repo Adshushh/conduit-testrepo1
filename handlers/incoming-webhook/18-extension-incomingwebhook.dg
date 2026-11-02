@@ -2,6 +2,9 @@
 botName = "flux";
 dbName = "conduittickets";
 routeDb = "conduitroutes";
+nowMs = zoho.currenttime.toLong();
+// Webhooks run without a Cliq session, so settings cannot be read and database calls need conduitdata.
+data = Map();
 try
 {
 	data = body.toString().toMap();
@@ -10,6 +13,10 @@ catch (err)
 {
 	data = Map();
 }
+if(data.get("action") != "tick")
+{
+	return Map();
+}
 
 // Unowned bugs are collected per team lead and sent as one message at the end.
 leadDigest = Map();
@@ -17,6 +24,9 @@ maxLeadReminders = 3;
 statusList = {"Open","Needs info"};
 for each wanted in statusList
 {
+	// Read every matching record, 100 at a time. Records are kept once by id, and reading
+	// stops when a page is short or brings nothing new.
+	listResp = Map();
 	listResp.put("status","SUCCESS");
 	pagedList = List();
 	pagedIds = List();
@@ -69,9 +79,32 @@ for each wanted in statusList
 		{
 			try
 			{
+				recordId = t.get("id").toString();
+				ticketId = t.get("ticketid");
+				status = t.get("status");
+				assignee = ifnull(t.get("assignee"),"unassigned");
+				tTitle = t.get("title");
+				tDetails = ifnull(t.get("details"),"");
+				meta = t.get("meta").toList();
+				tSeverity = meta.get(0);
+				tService = meta.get(1);
+				originChat = meta.get(2);
+				reporter = meta.get(3);
+				label = ticketId + " (" + tTitle + ")";
+				// Very old tickets have no team lead saved, so skip them.
+				if(meta.size() < 6)
+				{
+					continue;
+				}
+				escalateTo = meta.get(4).replaceAll(";",",");
+				escalateName = "the " + tService + " team lead";
+				waitMs = (meta.get(5).toDecimal() * 3600000).toLong();
 				routeResp = zoho.cliq.getRecords(routeDb,{"criteria":"ticketrec==" + recordId},"conduitdata");
 				if(routeResp.get("status") != null && routeResp.get("status").equalsIgnoreCase("SUCCESS") && routeResp.get("list").size() > 0)
 				{
+					routeRec = routeResp.get("list").get(0);
+					routeId = routeRec.get("id").toString();
+					declined = ifnull(routeRec.get("declined"),"").toString();
 					reminders = ifnull(routeRec.get("reminders"),0).toLong();
 					changedAt = ifnull(routeRec.get("changedat"),nowMs).toLong();
 					candList = List();
@@ -122,15 +155,40 @@ for each wanted in statusList
 						}
 						else if(assignee == "unassigned")
 						{
+							// Nobody owns it: remind the lead up to 3 times. After that it stays in Desk under Needs an owner.
+							if(status == "Open" && reminders < maxLeadReminders)
+							{
+								nagCount = reminders + 1;
+								shortName = tTitle.toString();
+								if(shortName.length() > 60)
+								{
+									shortName = shortName.subString(0,59) + "…";
+								}
+								leadLine = "• *" + ticketId + "* · " + shortName + " · " + tSeverity.toString() + " · reminder " + nagCount.toString() + " of " + maxLeadReminders.toString();
+								leadLines = List();
+								if(leadDigest.get(escalateTo) != null)
+								{
+									leadLines = leadDigest.get(escalateTo);
+								}
+								leadLines.add(leadLine);
+								leadDigest.put(escalateTo,leadLines);
+								zoho.cliq.updateRecord(routeDb,routeId,{"reminders":nagCount,"changedat":nowMs},"conduitdata");
+							}
 						}
 						else if(reminders == 0)
 						{
+							// Build the card only for tickets that get one. Webhooks cannot read settings,
+							// so files are listed without GitHub links.
+							tcSvc = Map();
 							tcProjectName = tService;
 							tcReporter = reporter;
 							tcNotes = "";
 							tcAssignee = assignee;
 							// ---- ticket card layout: title and description as text, the rest as slides ----
 							// details holds the description, then sections that each start with a bold header such as *AI note:*
+							tcAll = tDetails.toString();
+							tcParts = tcAll.toList("\n\n*");
+							tcDesc = "";
 							tcNote = "";
 							tcFileText = "";
 							tcExtra = "";
@@ -168,9 +226,29 @@ for each wanted in statusList
 								}
 								tcPartNo = tcPartNo + 1;
 							}
+							tcText = "*" + tTitle.toString() + "*\n" + tcDesc;
+							tcRepoPath = "";
+							tcRef = "HEAD";
+							tcProject = tcProjectName;
+							if(tcSvc.get("owner") != null && tcSvc.get("repo") != null)
+							{
+								tcRepoPath = tcSvc.get("owner").toString() + "/" + tcSvc.get("repo").toString();
+								tcProject = tcProjectName + " (" + tcRepoPath + ")";
+								tcBranch = ifnull(tcSvc.get("branch"),"").toString();
+								if(tcBranch != "")
+								{
+									tcRef = tcBranch;
+								}
+							}
 							tcBaseSlides = List();
 							tcDetailRows = List();
 							tcDetailRows.add({"Project":tcProject});
+							tcDetailRows.add({"Severity":tSeverity.toString()});
+							tcDetailRows.add({"Reported by":tcReporter});
+							if(tcAssignee != "" && tcAssignee != "unassigned")
+							{
+								tcDetailRows.add({"Assigned to":tcAssignee});
+							}
 							if(tcNotes != "")
 							{
 								tcDetailRows.add({"Routing notes":tcNotes});
@@ -188,6 +266,9 @@ for each wanted in statusList
 								tcNoteSlide.put("data",tcNote);
 								tcBaseSlides.add(tcNoteSlide);
 							}
+							// likely files: "path (lines 1-20)" per line, shown as GitHub links when the repository is known
+							tcFileItems = List();
+							tcFileLines = tcFileText.toList("\n");
 							for each tcLine in tcFileLines
 							{
 								tcItem = tcLine.trim();
@@ -221,6 +302,22 @@ for each wanted in statusList
 									}
 									tcFileItems.add(tcShown);
 								}
+							}
+							if(tcFileItems.size() > 0)
+							{
+								tcFileSlide = Map();
+								tcFileSlide.put("type","list");
+								tcFileSlide.put("title","Likely files");
+								tcFileSlide.put("data",tcFileItems);
+								tcBaseSlides.add(tcFileSlide);
+							}
+							if(tcExtra != "")
+							{
+								tcExtraSlide = Map();
+								tcExtraSlide.put("type","text");
+								tcExtraSlide.put("title","Updates");
+								tcExtraSlide.put("data",tcExtra);
+								tcBaseSlides.add(tcExtraSlide);
 							}
 							// likely owners: who they are on GitHub and in Cliq; team leads also see each share of the code
 							tcOwnerDev = List();
@@ -267,6 +364,26 @@ for each wanted in statusList
 									tcOwnerLead.add(tcLeadRow);
 								}
 							}
+							tcSlides = List();
+							tcSlides.addAll(tcBaseSlides);
+							tcLeadSlides = List();
+							tcLeadSlides.addAll(tcBaseSlides);
+							if(tcOwnerDev.size() > 0)
+							{
+								tcDevTable = Map();
+								tcDevTable.put("type","table");
+								tcDevTable.put("title","Likely owners");
+								tcDevTable.put("data",{"headers":{"Developer","GitHub","Cliq user"},"rows":tcOwnerDev});
+								tcSlides.add(tcDevTable);
+								tcLeadTable = Map();
+								tcLeadTable.put("type","table");
+								tcLeadTable.put("title","Likely owners");
+								tcLeadTable.put("data",{"headers":{"Developer","GitHub","Cliq user","Share"},"rows":tcOwnerLead});
+								tcLeadSlides.add(tcLeadTable);
+							}
+							cardText = tcText;
+							openButtons = List();
+							openButtons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 							openButtons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 							openButtons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 							openButtons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
@@ -295,6 +412,18 @@ for each wanted in statusList
 						}
 						else
 						{
+							// Already reminded and still silent, so move it on.
+							silent = assignee;
+							declined = declined + "," + silent;
+							newAssignee = "";
+							for each cand in candList
+							{
+								candEmail = ifnull(cand.get("cliq"),"").toString().toLowerCase();
+								if(newAssignee == "" && candEmail != "" && !declined.toList(",").contains(candEmail))
+								{
+									newAssignee = candEmail;
+								}
+							}
 							// Build the card only for tickets that get one. Webhooks cannot read settings,
 							// so files are listed without GitHub links.
 							tcSvc = Map();
@@ -304,6 +433,9 @@ for each wanted in statusList
 							tcAssignee = assignee;
 							// ---- ticket card layout: title and description as text, the rest as slides ----
 							// details holds the description, then sections that each start with a bold header such as *AI note:*
+							tcAll = tDetails.toString();
+							tcParts = tcAll.toList("\n\n*");
+							tcDesc = "";
 							tcNote = "";
 							tcFileText = "";
 							tcExtra = "";
@@ -341,6 +473,23 @@ for each wanted in statusList
 								}
 								tcPartNo = tcPartNo + 1;
 							}
+							tcText = "*" + tTitle.toString() + "*\n" + tcDesc;
+							tcRepoPath = "";
+							tcRef = "HEAD";
+							tcProject = tcProjectName;
+							if(tcSvc.get("owner") != null && tcSvc.get("repo") != null)
+							{
+								tcRepoPath = tcSvc.get("owner").toString() + "/" + tcSvc.get("repo").toString();
+								tcProject = tcProjectName + " (" + tcRepoPath + ")";
+								tcBranch = ifnull(tcSvc.get("branch"),"").toString();
+								if(tcBranch != "")
+								{
+									tcRef = tcBranch;
+								}
+							}
+							tcBaseSlides = List();
+							tcDetailRows = List();
+							tcDetailRows.add({"Project":tcProject});
 							tcDetailRows.add({"Severity":tSeverity.toString()});
 							tcDetailRows.add({"Reported by":tcReporter});
 							if(tcAssignee != "" && tcAssignee != "unassigned")
@@ -351,6 +500,9 @@ for each wanted in statusList
 							{
 								tcDetailRows.add({"Routing notes":tcNotes});
 							}
+							tcDetailSlide = Map();
+							tcDetailSlide.put("type","label");
+							tcDetailSlide.put("title","Details");
 							tcDetailSlide.put("data",tcDetailRows);
 							tcBaseSlides.add(tcDetailSlide);
 							if(tcNote != "")
@@ -361,6 +513,9 @@ for each wanted in statusList
 								tcNoteSlide.put("data",tcNote);
 								tcBaseSlides.add(tcNoteSlide);
 							}
+							// likely files: "path (lines 1-20)" per line, shown as GitHub links when the repository is known
+							tcFileItems = List();
+							tcFileLines = tcFileText.toList("\n");
 							for each tcLine in tcFileLines
 							{
 								tcItem = tcLine.trim();
@@ -394,6 +549,22 @@ for each wanted in statusList
 									}
 									tcFileItems.add(tcShown);
 								}
+							}
+							if(tcFileItems.size() > 0)
+							{
+								tcFileSlide = Map();
+								tcFileSlide.put("type","list");
+								tcFileSlide.put("title","Likely files");
+								tcFileSlide.put("data",tcFileItems);
+								tcBaseSlides.add(tcFileSlide);
+							}
+							if(tcExtra != "")
+							{
+								tcExtraSlide = Map();
+								tcExtraSlide.put("type","text");
+								tcExtraSlide.put("title","Updates");
+								tcExtraSlide.put("data",tcExtra);
+								tcBaseSlides.add(tcExtraSlide);
 							}
 							// likely owners: who they are on GitHub and in Cliq; team leads also see each share of the code
 							tcOwnerDev = List();
@@ -440,6 +611,26 @@ for each wanted in statusList
 									tcOwnerLead.add(tcLeadRow);
 								}
 							}
+							tcSlides = List();
+							tcSlides.addAll(tcBaseSlides);
+							tcLeadSlides = List();
+							tcLeadSlides.addAll(tcBaseSlides);
+							if(tcOwnerDev.size() > 0)
+							{
+								tcDevTable = Map();
+								tcDevTable.put("type","table");
+								tcDevTable.put("title","Likely owners");
+								tcDevTable.put("data",{"headers":{"Developer","GitHub","Cliq user"},"rows":tcOwnerDev});
+								tcSlides.add(tcDevTable);
+								tcLeadTable = Map();
+								tcLeadTable.put("type","table");
+								tcLeadTable.put("title","Likely owners");
+								tcLeadTable.put("data",{"headers":{"Developer","GitHub","Cliq user","Share"},"rows":tcOwnerLead});
+								tcLeadSlides.add(tcLeadTable);
+							}
+							cardText = tcText;
+							openButtons = List();
+							openButtons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 							openButtons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 							openButtons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
 							openButtons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
@@ -477,6 +668,30 @@ for each wanted in statusList
 									routeOutcome = newAssignee + " couldn't be messaged (not subscribed to Flux). ";
 									newAssignee = "";
 								}
+							}
+							if(newAssignee == "")
+							{
+								zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":"unassigned"},"conduitdata");
+								adminsDelivered = true;
+								try
+								{
+									dmMsg = Map();
+									dmMsg.put("text",cardText);
+									dmMsg.put("slides",tcLeadSlides);
+									dmMsg.put("card",{"title":ticketId + " · Needs an owner","theme":"modern-inline"});
+									dmMsg.put("buttons",openButtons);
+									dmMsg.put("userids",escalateTo);
+									dmResp = zoho.cliq.postToBot(botName,dmMsg);
+									if(dmResp != null && dmResp.get("code") != null)
+									{
+										adminsDelivered = false;
+									}
+								}
+								catch (err)
+								{
+									adminsDelivered = false;
+								}
+								routeOutcome = routeOutcome + "No linked developer is available for this bug, so it went to " + escalateName + ".";
 							}
 							if(routeId != "")
 							{
@@ -529,6 +744,22 @@ for each wanted in statusList
 									stIndex = stIndex + 1;
 								}
 							}
+							if(stIndex == 6)
+							{
+								stMetaText = stMetaText + ",-";
+								stIndex = 7;
+							}
+							if(stIndex == 7)
+							{
+								try
+								{
+									zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText},"conduitdata");
+								}
+								catch (err)
+								{
+									info "stats not saved";
+								}
+							}
 							movedMsg = {"text":"⏳ " + label + " has been passed to another developer so it gets picked up sooner."};
 							sent = true;
 							try
@@ -564,6 +795,31 @@ for each wanted in statusList
 				info "reminder skipped for " + ifnull(t.get("ticketid"),"?") + ": " + err;
 			}
 		}
+	}
+}
+for each leadKey in leadDigest.keys()
+{
+	dueLines = leadDigest.get(leadKey);
+	dueText = "";
+	for each dueLine in dueLines
+	{
+		dueText = dueText + "\n" + dueLine;
+	}
+	headText = "⏰ *" + dueLines.size().toString() + " bugs still need an owner*";
+	if(dueLines.size() == 1)
+	{
+		headText = "⏰ *1 bug still needs an owner*";
+	}
+	try
+	{
+		digestMsg = Map();
+		digestMsg.put("text",headText + dueText + "\n\nAssign them from *Desk → Needs an owner*, or from their cards in this chat.");
+		digestMsg.put("userids",leadKey);
+		zoho.cliq.postToBot(botName,digestMsg);
+	}
+	catch (err)
+	{
+		info "could not remind " + leadKey;
 	}
 }
 return Map();
