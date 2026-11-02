@@ -1,0 +1,922 @@
+// conduitstats: the period buttons on the Conduit stats card in Flux. Each click redraws the card.
+// Admins see every project; team leads only their own and never routing accuracy.
+dbName = "conduittickets";
+botName = "flux";
+me = user.get("email").toLowerCase();
+nowMs = zoho.currenttime.toLong();
+today = zoho.currentdate.toString("yyyy-MM-dd");
+// Button keys look like stats-p30.
+tab = "p30";
+statsKey = ifnull(arguments.get("key"),"").toString();
+if(statsKey.startsWith("stats-"))
+{
+	tab = statsKey.getSuffix("stats-");
+}
+periodDays = 7;
+periodName = "the last 7 days";
+periodLabel = "7 days";
+if(tab == "p30")
+{
+	periodDays = 30;
+	periodName = "the last 30 days";
+	periodLabel = "30 days";
+}
+if(tab == "p90")
+{
+	periodDays = 90;
+	periodName = "the last 90 days";
+	periodLabel = "90 days";
+}
+if(tab == "pall")
+{
+	periodDays = 0;
+	periodName = "all time";
+	periodLabel = "All time";
+}
+periodMs = periodDays * 86400000;
+
+admins = "";
+services = Map();
+people = Map();
+peopleLeft = Map();
+leftCheck = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+	p = zoho.cliq.extension.getProperties("people");
+	if(p != null && p.get("people") != null)
+	{
+		people = p.get("people").toMap();
+	}
+	p = zoho.cliq.extension.getProperties("peopleleft");
+	if(p != null && p.get("peopleleft") != null)
+	{
+		peopleLeft = p.get("peopleleft").toMap();
+	}
+	p = zoho.cliq.extension.getProperties("leftcheck");
+	if(p != null && p.get("leftcheck") != null)
+	{
+		leftCheck = p.get("leftcheck").toMap();
+	}
+}
+catch (err)
+{
+	info "settings could not be read";
+}
+adminList = admins.toList(",");
+isAdmin = adminList.contains(me);
+leadProjects = List();
+for each svcName in services.keys()
+{
+	if(ifnull(services.get(svcName).get("teamlead"),"").toString().toLowerCase() == me)
+	{
+		leadProjects.add(svcName);
+	}
+}
+if(!isAdmin && leadProjects.size() == 0)
+{
+	return {"text":"Statistics are for admins and team leads."};
+}
+
+// Once a day, check that linked developers still belong to the organization.
+// Up to 8 people per opening, so the widget stays quick. Two misses on different days unlink someone.
+if(ifnull(leftCheck.get("day"),"").toString() != today)
+{
+	leftCheck.put("day",today);
+	leftCheck.put("done","");
+}
+checkDone = ifnull(leftCheck.get("done"),"").toString();
+checkDoneList = checkDone.toList(",");
+strikes = Map();
+try
+{
+	strikes = ifnull(leftCheck.get("strikes"),"{}").toString().toMap();
+}
+catch (err)
+{
+	strikes = Map();
+}
+linkedEmails = List();
+for each linkGh in people.keys()
+{
+	linkEmail = people.get(linkGh).toString().toLowerCase();
+	if(!linkedEmails.contains(linkEmail))
+	{
+		linkedEmails.add(linkEmail);
+	}
+}
+checkCount = 0;
+checkProblem = "";
+leavers = List();
+for each checkEmail in linkedEmails
+{
+	if(checkProblem == "" && checkCount < 8 && !checkDoneList.contains(checkEmail))
+	{
+		checkCount = checkCount + 1;
+		checkCode = "";
+		checkFound = false;
+		try
+		{
+			checkResp = invokeurl
+			[
+				url :"https://cliq.zoho.com/api/v2/users?status=active&limit=20&search=" + zoho.encryption.urlEncode(checkEmail)
+				type :GET
+				connection:"conduitcliq"
+				detailed:true
+			];
+			checkCode = checkResp.get("responseCode").toString();
+			if(checkCode == "200")
+			{
+				checkList = checkResp.get("responseText").toString().toMap().get("data").toString().toJSONList();
+				for each checkItem in checkList
+				{
+					if(ifnull(checkItem.toString().toMap().get("email_id"),"").toString().toLowerCase() == checkEmail)
+					{
+						checkFound = true;
+					}
+				}
+			}
+		}
+		catch (err)
+		{
+			checkCode = "error";
+		}
+		if(checkCode != "200")
+		{
+			checkProblem = checkCode;
+		}
+		else
+		{
+			checkDoneList.add(checkEmail);
+			if(checkFound)
+			{
+				strikes.remove(checkEmail);
+			}
+			else
+			{
+				firstMiss = ifnull(strikes.get(checkEmail),"").toString();
+				if(firstMiss == "")
+				{
+					strikes.put(checkEmail,today);
+				}
+				else if(firstMiss != today)
+				{
+					leavers.add(checkEmail);
+					strikes.remove(checkEmail);
+				}
+			}
+		}
+	}
+}
+leftNotes = List();
+if(leavers.size() > 0)
+{
+	whenText = zoho.currentdate.toString("dd MMM yyyy");
+	for each leaver in leavers
+	{
+		leaverProjects = List();
+		for each leaverSvcName in services.keys()
+		{
+			leaverSvc = services.get(leaverSvcName);
+			leaverMembers = ifnull(leaverSvc.get("members"),"").toString().toList(",");
+			if(leaverMembers.contains(leaver))
+			{
+				leaverMembers.removeElement(leaver);
+				joined1 = "";
+				for each joinItem1 in leaverMembers
+				{
+					if(joined1 != "")
+					{
+						joined1 = joined1 + ",";
+					}
+					joined1 = joined1 + joinItem1;
+				}
+				leaverSvc.put("members",joined1);
+				services.put(leaverSvcName,leaverSvc);
+				leaverProjects.add(leaverSvcName);
+			}
+		}
+		leaverNames = List();
+		peopleKeys = List();
+		for each leaverGh in people.keys()
+		{
+			peopleKeys.add(leaverGh);
+		}
+		for each leaverGh in peopleKeys
+		{
+			if(people.get(leaverGh).toString().toLowerCase() == leaver)
+			{
+				leftEntry = Map();
+				leftEntry.put("email",leaver);
+				joined2 = "";
+				for each joinItem2 in leaverProjects
+				{
+					if(joined2 != "")
+					{
+						joined2 = joined2 + ",";
+					}
+					joined2 = joined2 + joinItem2;
+				}
+				leftEntry.put("projects",joined2);
+				leftEntry.put("when",whenText);
+				peopleLeft.put(leaverGh,leftEntry);
+				people.remove(leaverGh);
+				leaverNames.add(leaverGh);
+			}
+		}
+		joined3 = "";
+		for each joinItem3 in leaverNames
+		{
+			if(joined3 != "")
+			{
+				joined3 = joined3 + ", ";
+			}
+			joined3 = joined3 + joinItem3;
+		}
+		leftNote = leaver + " (" + joined3 + ") left the organization. Unlinked";
+		if(leaverProjects.size() > 0)
+		{
+			joined4 = "";
+			for each joinItem4 in leaverProjects
+			{
+				if(joined4 != "")
+				{
+					joined4 = joined4 + ", ";
+				}
+				joined4 = joined4 + joinItem4;
+			}
+			leftNote = leftNote + " and removed from " + joined4;
+		}
+		leftNotes.add(leftNote + ".");
+	}
+	zoho.cliq.extension.setProperties({"people":people.toString(),"peopleleft":peopleLeft.toString(),"services":services.toString()});
+	try
+	{
+		leftMsg = Map();
+		joined5 = "";
+		for each joinItem5 in leftNotes
+		{
+			if(joined5 != "")
+			{
+				joined5 = joined5 + "\n";
+			}
+			joined5 = joined5 + joinItem5;
+		}
+		leftMsg.put("text","👋 " + joined5 + "\nRestore someone from /link if this is a mistake.");
+		leftMsg.put("userids",admins);
+		zoho.cliq.postToBot(botName,leftMsg);
+	}
+	catch (err)
+	{
+		info "could not tell the admins";
+	}
+}
+if(checkProblem != "" && ifnull(leftCheck.get("warned"),"").toString() != "yes")
+{
+	try
+	{
+		warnMsg = Map();
+		warnMsg.put("text","⚠️ Conduit couldn't check whether linked developers still belong to the organization (Cliq said " + checkProblem + "). An admin needs to re-authorize the conduitcliq connection.");
+		warnMsg.put("userids",admins);
+		zoho.cliq.postToBot(botName,warnMsg);
+	}
+	catch (err)
+	{
+		info "could not warn the admins";
+	}
+	leftCheck.put("warned","yes");
+}
+if(checkProblem == "" && checkCount > 0)
+{
+	leftCheck.put("warned","");
+}
+if(checkCount > 0 || checkProblem != "")
+{
+	joined6 = "";
+	for each joinItem6 in checkDoneList
+	{
+		if(joined6 != "")
+		{
+			joined6 = joined6 + ",";
+		}
+		joined6 = joined6 + joinItem6;
+	}
+	leftCheck.put("done",joined6);
+	leftCheck.put("strikes",strikes.toString());
+	zoho.cliq.extension.setProperties({"leftcheck":leftCheck.toString()});
+}
+leftEmails = List();
+for each leftGh in peopleLeft.keys()
+{
+	leftEmails.add(ifnull(peopleLeft.get(leftGh).toString().toMap().get("email"),"").toString().toLowerCase());
+}
+
+// Read every ticket, 100 at a time per status.
+statuses = {"Open","In progress","Needs info","Fixed","Closed","Won't fix","Merged"};
+openStatuses = {"Open","In progress","Needs info","Fixed"};
+tickets = List();
+for each st in statuses
+{
+	pagedIds = List();
+	pagedMore = true;
+	for each pagedNo in {1,2,3,4,5,6,7,8,9,10}
+	{
+		if(pagedMore)
+		{
+			pagedQuery = Map();
+			pagedQuery.put("criteria","status==" + st);
+			pagedQuery.put("limit",100);
+			if(pagedNo > 1)
+			{
+				pagedQuery.put("from_index",(pagedNo - 1) * 100);
+			}
+			pagedResp = zoho.cliq.getRecords(dbName,pagedQuery);
+			pagedAdded = 0;
+			if(pagedResp.get("status") != null && pagedResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
+			{
+				pagedPage = pagedResp.get("list");
+				for each pagedRec in pagedPage
+				{
+					pagedId = pagedRec.get("id").toString();
+					if(!pagedIds.contains(pagedId))
+					{
+						pagedIds.add(pagedId);
+						tickets.add(pagedRec);
+						pagedAdded = pagedAdded + 1;
+					}
+				}
+				if(pagedPage.size() < 100 || pagedAdded == 0)
+				{
+					pagedMore = false;
+				}
+			}
+			else
+			{
+				pagedMore = false;
+			}
+		}
+	}
+}
+
+// Counters
+outcomes = Map();
+for each outInit in {"Right first time","Moved on (Not mine)","Forwarded","Moved by reminder","Lead decided","Still waiting","Closed without accepting"}
+{
+	outcomes.put(outInit,0);
+}
+directDone = 0;
+directRight = 0;
+prevDone = 0;
+prevRight = 0;
+leadPicked = 0;
+leadTop = 0;
+trackedSince = 0;
+sevOrder = {"Blocker","High","Medium","Low"};
+acceptTimes = Map();
+fixTimes = Map();
+closeTimes = Map();
+for each sevName in sevOrder
+{
+	acceptTimes.put(sevName,List());
+	fixTimes.put(sevName,List());
+	closeTimes.put(sevName,List());
+}
+blockersAccepted = 0;
+blockersFast = 0;
+projectNums = Map();
+personNums = Map();
+for each t in tickets
+{
+	meta = t.get("meta").toList();
+	if(meta.size() < 4)
+	{
+		continue;
+	}
+	tSeverity = meta.get(0);
+	tProject = meta.get(1);
+	if(!isAdmin && !leadProjects.contains(tProject))
+	{
+		continue;
+	}
+	tStatus = t.get("status").toString();
+	tAssignee = ifnull(t.get("assignee"),"unassigned").toString().toLowerCase();
+	tId = t.get("ticketid").toString();
+	createdMs = 0;
+	try
+	{
+		if(tId.startsWith("BUG-") && tId.length() == 16)
+		{
+			createdMs = tId.subString(4).toTime("yyMMddHHmmss").toLong();
+		}
+		else
+		{
+			createdMs = t.get("created_time").toLong();
+		}
+	}
+	catch (err)
+	{
+		createdMs = 0;
+	}
+	ageMs = nowMs - createdMs;
+	inPeriod = (periodDays == 0 || ageMs <= periodMs);
+	inPrev = (periodDays > 0 && ageMs > periodMs && ageMs <= periodMs * 2);
+	// The stats record lives in meta field 8 as S:key=value;key=value
+	stMap = Map();
+	for each stPart in meta
+	{
+		if(stPart.startsWith("S:"))
+		{
+			stPairs = stPart.subString(2).toList(";");
+			for each stPair in stPairs
+			{
+				if(stPair.contains("="))
+				{
+					stMap.put(stPair.getPrefix("="),stPair.getSuffix("="));
+				}
+			}
+		}
+	}
+	sFirst = ifnull(stMap.get("f"),"").toString();
+	sVia = ifnull(stMap.get("v"),"").toString();
+	sBy = ifnull(stMap.get("by"),"").toString();
+	sFixer = ifnull(stMap.get("fx"),"").toString();
+	sPassed = ifnull(stMap.get("d"),"").toString();
+	sPick = ifnull(stMap.get("pk"),"").toString();
+	sEnd = ifnull(stMap.get("end"),"").toString();
+	sAccepted = ifnull(stMap.get("a"),"").toString();
+	sFixed = ifnull(stMap.get("x"),"").toString();
+	sEnded = ifnull(stMap.get("e"),"").toString();
+	sMoves = ifnull(stMap.get("nm"),"0").toString().toLong() + ifnull(stMap.get("fw"),"0").toString().toLong() + ifnull(stMap.get("rm"),"0").toString().toLong();
+
+	// Projects
+	pn = projectNums.get(tProject);
+	if(pn == null)
+	{
+		pn = Map();
+		pn.put("filed",0);
+		pn.put("open",0);
+		pn.put("dups",0);
+		pn.put("tracked",0);
+		pn.put("moves",0);
+		pn.put("done",0);
+		pn.put("right",0);
+	}
+	if(openStatuses.contains(tStatus))
+	{
+		pn.put("open",pn.get("open").toLong() + 1);
+	}
+	if(inPeriod && tStatus == "Merged")
+	{
+		pn.put("dups",pn.get("dups").toLong() + 1);
+	}
+	if(inPeriod && tStatus != "Merged")
+	{
+		pn.put("filed",pn.get("filed").toLong() + 1);
+	}
+
+	// Routing and speed only exist for tickets filed since the Conduit stats came in.
+	if(sFirst != "" && (inPeriod || inPrev))
+	{
+		if(trackedSince == 0 || createdMs < trackedSince)
+		{
+			trackedSince = createdMs;
+		}
+		outName = "Closed without accepting";
+		if(sVia != "direct")
+		{
+			outName = "Lead decided";
+		}
+		else if(sMoves == 0 && sAccepted != "" && sBy == sFirst)
+		{
+			outName = "Right first time";
+		}
+		else if(ifnull(stMap.get("nm"),"0").toString() != "0")
+		{
+			outName = "Moved on (Not mine)";
+		}
+		else if(ifnull(stMap.get("fw"),"0").toString() != "0")
+		{
+			outName = "Forwarded";
+		}
+		else if(ifnull(stMap.get("rm"),"0").toString() != "0")
+		{
+			outName = "Moved by reminder";
+		}
+		else if(sAccepted == "" && sEnded == "")
+		{
+			outName = "Still waiting";
+		}
+		countsAsDone = (sVia == "direct" && outName != "Still waiting");
+		if(inPeriod)
+		{
+			outcomes.put(outName,outcomes.get(outName).toLong() + 1);
+			pn.put("tracked",pn.get("tracked").toLong() + 1);
+			pn.put("moves",pn.get("moves").toLong() + sMoves);
+			if(countsAsDone)
+			{
+				directDone = directDone + 1;
+				pn.put("done",pn.get("done").toLong() + 1);
+				if(outName == "Right first time")
+				{
+					directRight = directRight + 1;
+					pn.put("right",pn.get("right").toLong() + 1);
+				}
+			}
+			if(sVia == "lead" && sPick != "")
+			{
+				leadPicked = leadPicked + 1;
+				if(sPick == "top")
+				{
+					leadTop = leadTop + 1;
+				}
+			}
+			if(acceptTimes.get(tSeverity) != null)
+			{
+				if(sAccepted != "")
+				{
+					acceptMins = ((sAccepted.toLong() - createdMs) / 60000).toLong();
+					sevList = acceptTimes.get(tSeverity);
+					sevList.add(acceptMins);
+					acceptTimes.put(tSeverity,sevList);
+					if(tSeverity == "Blocker")
+					{
+						blockersAccepted = blockersAccepted + 1;
+						if(acceptMins <= 60)
+						{
+							blockersFast = blockersFast + 1;
+						}
+					}
+				}
+				if(sFixed != "")
+				{
+					sevList = fixTimes.get(tSeverity);
+					sevList.add(((sFixed.toLong() - createdMs) / 60000).toLong());
+					fixTimes.put(tSeverity,sevList);
+				}
+				if(sEnded != "" && sEnd == "closed")
+				{
+					sevList = closeTimes.get(tSeverity);
+					sevList.add(((sEnded.toLong() - createdMs) / 60000).toLong());
+					closeTimes.put(tSeverity,sevList);
+				}
+			}
+		}
+		if(inPrev && countsAsDone)
+		{
+			prevDone = prevDone + 1;
+			if(outName == "Right first time")
+			{
+				prevRight = prevRight + 1;
+			}
+		}
+	}
+	projectNums.put(tProject,pn);
+
+	// People: counted per project, so a lead sees only work in their projects.
+	touched = Map();
+	if(openStatuses.contains(tStatus) && tAssignee != "unassigned")
+	{
+		touched.put(tAssignee + "#n","assigned");
+	}
+	if(inPeriod)
+	{
+		if(sBy != "")
+		{
+			touched.put(sBy + "#a","accepted");
+		}
+		if(sFixer != "")
+		{
+			touched.put(sFixer + "#x","fixed");
+		}
+		passedList = sPassed.toList("|");
+		for each passedEmail in passedList
+		{
+			if(passedEmail.trim() != "")
+			{
+				touched.put(passedEmail.trim() + "#d","passed");
+			}
+		}
+	}
+	for each touchKey in touched.keys()
+	{
+		touchEmail = touchKey.getPrefix("#");
+		touchWhat = touched.get(touchKey);
+		personSlot = tProject + "|" + touchEmail;
+		pp = personNums.get(personSlot);
+		if(pp == null)
+		{
+			pp = Map();
+			pp.put("assigned",0);
+			pp.put("accepted",0);
+			pp.put("fixed",0);
+			pp.put("passed",0);
+		}
+		pp.put(touchWhat,pp.get(touchWhat).toLong() + 1);
+		personNums.put(personSlot,pp);
+	}
+}
+
+// The card: period buttons, then one slide per section.
+periodButtons = List();
+for each periodItem in {"p7","p30","p90","pall"}
+{
+	periodText = "7 days";
+	if(periodItem == "p30")
+	{
+		periodText = "30 days";
+	}
+	if(periodItem == "p90")
+	{
+		periodText = "90 days";
+	}
+	if(periodItem == "pall")
+	{
+		periodText = "All time";
+	}
+	periodButton = Map();
+	periodButton.put("label",periodText);
+	periodButton.put("type","+");
+	periodButton.put("key","stats-" + periodItem);
+	periodButton.put("action",{"type":"invoke.function","data":{"name":"conduitstats"}});
+	periodButtons.add(periodButton);
+}
+slides = List();
+scopeText = "All projects";
+if(!isAdmin)
+{
+	joined7 = "";
+	for each joinItem7 in leadProjects
+	{
+		if(joined7 != "")
+		{
+			joined7 = joined7 + ", ";
+		}
+		joined7 = joined7 + joinItem7;
+	}
+	scopeText = joined7;
+}
+sinceText = "Routing and speed count bugs filed from now on.";
+if(trackedSince > 0)
+{
+	sinceDays = ((nowMs - trackedSince) / 86400000).toLong();
+	sinceText = "Routing and speed count bugs filed since " + zoho.currentdate.subDay(sinceDays).toString("dd MMM yyyy") + ".";
+}
+cardText = "*" + scopeText + "* · " + periodName + "\n" + sinceText;
+if(leftNotes.size() > 0)
+{
+	joined8 = "";
+	for each joinItem8 in leftNotes
+	{
+		if(joined8 != "")
+		{
+			joined8 = joined8 + "\n";
+		}
+		joined8 = joined8 + joinItem8;
+	}
+	cardText = cardText + "\n👋 " + joined8;
+}
+
+// Routing: admins only
+if(isAdmin)
+{
+	accuracyText = "—";
+	if(directDone > 0)
+	{
+		nowPct = ((directRight * 100).toDecimal() / directDone).round(0).toLong();
+		accuracyText = nowPct.toString() + "% (" + directRight.toString() + " of " + directDone.toString() + ")";
+		if(prevDone > 0)
+		{
+			prevPct = ((prevRight * 100).toDecimal() / prevDone).round(0).toLong();
+			if(nowPct > prevPct)
+			{
+				accuracyText = accuracyText + ", up from " + prevPct.toString() + "%";
+			}
+			else if(nowPct < prevPct)
+			{
+				accuracyText = accuracyText + ", down from " + prevPct.toString() + "%";
+			}
+			else
+			{
+				accuracyText = accuracyText + ", same as before";
+			}
+		}
+	}
+	agreeText = "—";
+	if(leadPicked > 0)
+	{
+		agreeText = ((leadTop * 100).toDecimal() / leadPicked).round(0).toLong().toString() + "% (" + leadTop.toString() + " of " + leadPicked.toString() + ")";
+	}
+	routingRows = List();
+	routingRows.add({"Routed right first time":accuracyText});
+	routingRows.add({"Lead agreed with Conduit":agreeText});
+	slides.add({"type":"label","title":"Routing","data":routingRows});
+	outcomeRows = List();
+	for each outShow in outcomes.keys()
+	{
+		if(outcomes.get(outShow).toLong() > 0)
+		{
+			outcomeRows.add({"Outcome":outShow,"Bugs":outcomes.get(outShow).toString()});
+		}
+	}
+	if(outcomeRows.size() > 0)
+	{
+		slides.add({"type":"table","title":"Outcomes","data":{"headers":{"Outcome","Bugs"},"rows":outcomeRows}});
+	}
+}
+
+// Speed
+speedRows = List();
+for each sevName in sevOrder
+{
+	speedRow = Map();
+	speedRow.put("Severity",sevName);
+	for each speedPart in {"Accept","Fix","Close"}
+	{
+		speedList = acceptTimes.get(sevName);
+		if(speedPart == "Fix")
+		{
+			speedList = fixTimes.get(sevName);
+		}
+		if(speedPart == "Close")
+		{
+			speedList = closeTimes.get(sevName);
+		}
+		speedText = "—";
+		if(speedList.size() > 0)
+		{
+			speedSorted = speedList.sort(true);
+			medianMins = speedSorted.get((speedSorted.size() / 2).toLong()).toLong();
+			if(medianMins < 60)
+			{
+				speedText = medianMins.toString() + " min";
+			}
+			else if(medianMins < 2880)
+			{
+				speedText = (medianMins.toDecimal() / 60).round(1).toString() + " h";
+			}
+			else
+			{
+				speedText = (medianMins.toDecimal() / 1440).round(1).toString() + " d";
+			}
+		}
+		speedRow.put(speedPart,speedText);
+	}
+	speedRows.add(speedRow);
+}
+speedTitle = "Speed (median from filing)";
+if(blockersAccepted > 0)
+{
+	speedTitle = speedTitle + " · Blockers accepted within 1 hour: " + blockersFast.toString() + " of " + blockersAccepted.toString();
+}
+slides.add({"type":"table","title":speedTitle,"data":{"headers":{"Severity","Accept","Fix","Close"},"rows":speedRows}});
+
+// Projects
+projectRows = List();
+for each projName in projectNums.keys()
+{
+	pn = projectNums.get(projName);
+	projectRow = Map();
+	projectRow.put("Project",projName);
+	projectRow.put("Filed",pn.get("filed").toString());
+	projectRow.put("Open now",pn.get("open").toString());
+	projectRow.put("Duplicates",pn.get("dups").toString());
+	handoffText = "—";
+	if(pn.get("tracked").toLong() > 0)
+	{
+		handoffText = (pn.get("moves").toLong().toDecimal() / pn.get("tracked").toLong()).round(1).toString();
+	}
+	projectRow.put("Hand-offs",handoffText);
+	if(isAdmin)
+	{
+		projectAccuracy = "—";
+		if(pn.get("done").toLong() > 0)
+		{
+			projectAccuracy = ((pn.get("right").toLong() * 100).toDecimal() / pn.get("done").toLong()).round(0).toLong().toString() + "%";
+		}
+		projectRow.put("Right first time",projectAccuracy);
+	}
+	projectRows.add(projectRow);
+}
+if(projectRows.size() > 0)
+{
+	if(isAdmin)
+	{
+		slides.add({"type":"table","title":"Projects","data":{"headers":{"Project","Filed","Open now","Duplicates","Hand-offs","Right first time"},"rows":projectRows}});
+	}
+	else
+	{
+		slides.add({"type":"table","title":"Projects","data":{"headers":{"Project","Filed","Open now","Duplicates","Hand-offs"},"rows":projectRows}});
+	}
+}
+
+// People: one table, a row per member of each project, then (admins only) people who are not members anywhere.
+shownProjects = leadProjects;
+if(isAdmin)
+{
+	shownProjects = List();
+	for each svcName in services.keys()
+	{
+		shownProjects.add(svcName);
+	}
+}
+peopleRows = List();
+allMembers = List();
+noMembers = List();
+for each memberProject in shownProjects
+{
+	memberSvc = services.get(memberProject);
+	memberEmails = List();
+	if(memberSvc != null)
+	{
+		memberEmails = ifnull(memberSvc.get("members"),"").toString().toList(",");
+	}
+	memberCount = 0;
+	for each memberEmailItem in memberEmails
+	{
+		memberEmail = memberEmailItem.trim().toLowerCase();
+		if(memberEmail != "")
+		{
+			memberCount = memberCount + 1;
+			allMembers.add(memberProject + "|" + memberEmail);
+			pp = personNums.get(memberProject + "|" + memberEmail);
+			personLabel = memberEmail;
+			if(leftEmails.contains(memberEmail))
+			{
+				personLabel = memberEmail + " (left)";
+			}
+			personRow = Map();
+			personRow.put("Project",memberProject);
+			personRow.put("Person",personLabel);
+			if(pp == null)
+			{
+				personRow.put("Assigned now","0");
+				personRow.put("Accepted","0");
+				personRow.put("Fixed","0");
+				personRow.put("Passed on","0");
+			}
+			else
+			{
+				personRow.put("Assigned now",pp.get("assigned").toString());
+				personRow.put("Accepted",pp.get("accepted").toString());
+				personRow.put("Fixed",pp.get("fixed").toString());
+				personRow.put("Passed on",pp.get("passed").toString());
+			}
+			peopleRows.add(personRow);
+		}
+	}
+	if(memberCount == 0)
+	{
+		noMembers.add(memberProject);
+	}
+}
+if(isAdmin)
+{
+	for each personKey in personNums.keys()
+	{
+		if(!allMembers.contains(personKey))
+		{
+			pp = personNums.get(personKey);
+			outsiderMail = personKey.getSuffix("|");
+			outsiderLabel = outsiderMail;
+			if(leftEmails.contains(outsiderMail))
+			{
+				outsiderLabel = outsiderMail + " (left)";
+			}
+			outsiderRow = Map();
+			outsiderRow.put("Project",personKey.getPrefix("|") + " (not a member)");
+			outsiderRow.put("Person",outsiderLabel);
+			outsiderRow.put("Assigned now",pp.get("assigned").toString());
+			outsiderRow.put("Accepted",pp.get("accepted").toString());
+			outsiderRow.put("Fixed",pp.get("fixed").toString());
+			outsiderRow.put("Passed on",pp.get("passed").toString());
+			peopleRows.add(outsiderRow);
+		}
+	}
+}
+if(peopleRows.size() > 0)
+{
+	slides.add({"type":"table","title":"People","data":{"headers":{"Project","Person","Assigned now","Accepted","Fixed","Passed on"},"rows":peopleRows}});
+}
+if(noMembers.size() > 0)
+{
+	joined9 = "";
+	for each joinItem9 in noMembers
+	{
+		if(joined9 != "")
+		{
+			joined9 = joined9 + ", ";
+		}
+		joined9 = joined9 + joinItem9;
+	}
+	cardText = cardText + "\nNo members yet in " + joined9 + ". An admin can add them in /repo → Teams.";
+}
+return {"type":"message_edit","text":cardText,"card":{"title":"Conduit stats · " + periodLabel,"theme":"modern-inline"},"slides":slides,"buttons":periodButtons};
