@@ -1,0 +1,155 @@
+// /sweep: admins choose what to delete.
+me = user.get("email").toLowerCase();
+admins = "";
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString().toLowerCase();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+adminList = admins.toList(",");
+if(!adminList.contains(me))
+{
+	return {"text":"Only Conduit administrators can use /sweep."};
+}
+countStatuses = {"Open","In progress","Needs info","Fixed","Closed","Won't fix","Draft","Merged"};
+ticketCount = 0;
+for each countStatus in countStatuses
+{
+	// Read every matching record, 100 at a time. Records are kept once by id, and reading
+	// stops when a page is short or brings nothing new.
+	countResp = Map();
+	countResp.put("status","SUCCESS");
+	pagedList = List();
+	pagedIds = List();
+	pagedMore = true;
+	for each pagedNo in {1,2,3,4,5,6,7,8,9,10}
+	{
+		if(pagedMore)
+		{
+			pagedQuery = Map();
+			pagedQuery.put("criteria","status==" + countStatus);
+			pagedQuery.put("limit",100);
+			if(pagedNo > 1)
+			{
+				pagedQuery.put("from_index",(pagedNo - 1) * 100);
+			}
+			pagedResp = zoho.cliq.getRecords("conduittickets",pagedQuery);
+			pagedAdded = 0;
+			if(pagedResp.get("status") != null && pagedResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
+			{
+				pagedPage = pagedResp.get("list");
+				for each pagedRec in pagedPage
+				{
+					pagedId = pagedRec.get("id").toString();
+					if(!pagedIds.contains(pagedId))
+					{
+						pagedIds.add(pagedId);
+						pagedList.add(pagedRec);
+						pagedAdded = pagedAdded + 1;
+					}
+				}
+				if(pagedPage.size() < 100 || pagedAdded == 0)
+				{
+					pagedMore = false;
+				}
+			}
+			else
+			{
+				pagedMore = false;
+				if(pagedNo == 1)
+				{
+					countResp.put("status","FAILURE");
+				}
+			}
+		}
+	}
+	countResp.put("list",pagedList);
+	if(countResp.get("status") != null && countResp.get("status").toString().equalsIgnoreCase("SUCCESS"))
+	{
+		for each countRec in countResp.get("list")
+		{
+			ticketCount = ticketCount + 1;
+		}
+	}
+}
+ticketText = ticketCount.toString();
+if(ticketCount >= 1000)
+{
+	ticketText = "1000+";
+}
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+people = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("people");
+	if(p != null && p.get("people") != null)
+	{
+		people = p.get("people").toMap();
+	}
+}
+catch (err)
+{
+	people = Map();
+}
+otherAdmins = adminList.size() - 1;
+// Only offer what actually exists.
+sweepOptions = List();
+if(ticketCount > 0)
+{
+	sweepOptions.add({"label":"Tickets (" + ticketText + ")","value":"sw_tickets"});
+}
+if(services.size() > 0)
+{
+	repoLabel = "Repositories (" + services.size().toString() + ")";
+	if(ticketCount > 0)
+	{
+		repoLabel = repoLabel + ", only together with Tickets";
+	}
+	sweepOptions.add({"label":repoLabel,"value":"sw_repos"});
+}
+if(people.size() > 0)
+{
+	sweepOptions.add({"label":"Developer links (" + people.size().toString() + ")","value":"sw_links"});
+}
+if(otherAdmins > 0)
+{
+	sweepOptions.add({"label":"Administrators except you (" + otherAdmins.toString() + ")","value":"sw_admins"});
+}
+if(sweepOptions.size() == 0)
+{
+	return {"text":"There is nothing to sweep: no tickets, repositories, developer links or other administrators.","card":{"title":"Sweep","theme":"modern-inline"}};
+}
+hasTickets = "no";
+if(ticketCount > 0)
+{
+	hasTickets = "yes";
+}
+sweepInput = Map();
+sweepInput.put("type","checkbox");
+sweepInput.put("name","items");
+sweepInput.put("label","Delete");
+sweepInput.put("mandatory",true);
+sweepInput.put("options",sweepOptions);
+inputs = List();
+inputs.add(sweepInput);
+inputs.add({"type":"hidden","name":"hastickets","value":hasTickets});
+return {"type":"form","title":"Sweep","name":"sweep","hint":"Choose what to delete. You will confirm on the next step.","button_label":"Continue","inputs":inputs,"action":{"type":"invoke.function","name":"conduitsweepform"}};
