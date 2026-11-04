@@ -1,13 +1,35 @@
 // conduitbugsubmit: files a bug, finds who wrote the code and sends it to them.
+botName = "flux";
+dbName = "conduittickets";
+routeDb = "conduitroutes";
 nowMs = zoho.currenttime.toLong();
 values = form.get("values");
 bugTitle = values.get("title").toString().trim();
+bugDesc = values.get("description").toString().trim();
+severity = values.get("severity").get("label");
+// Project: a dropdown on /bug, a text field on "Report as bug"
+svcRaw = ifnull(values.get("service"),"");
+svcName = svcRaw.toString().trim();
+if(svcName.startsWith("{"))
+{
+	svcName = ifnull(svcRaw.toMap().get("value"),"").toString();
+}
 reporter = user.get("email").toLowerCase();
 clicker = reporter;
 clickerName = user.get("first_name");
 // filled only when the report came from "Report as bug" on a chat message
 srcUser = ifnull(values.get("srcuser"),"").toString().trim().toLowerCase();
 srcName = ifnull(values.get("srcname"),"").toString().trim();
+srcChat = ifnull(values.get("srcchat"),"").toString().trim();
+srcMsg = ifnull(values.get("srcmsg"),"").toString().trim();
+fromMessage = srcChat != "";
+onBehalf = false;
+if(srcUser.contains("@") && srcUser != clicker)
+{
+	// the person who wrote the message is the reporter and gets the updates
+	reporter = srcUser;
+	onBehalf = true;
+}
 if(srcName == "")
 {
 	srcName = reporter;
@@ -16,10 +38,29 @@ if(srcName == "")
 originChat = "dm";
 
 services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
 // match the typed project name; with only one project the field can be left blank
 if(svcName == "" && services.size() == 1)
 {
 	svcName = services.keys().get(0);
+}
+for each knownName in services.keys()
+{
+	if(knownName.toLowerCase() == svcName.toLowerCase())
+	{
+		svcName = knownName;
+	}
 }
 if(services.get(svcName) == null)
 {
@@ -34,6 +75,32 @@ if(services.get(svcName) == null)
 	}
 	return {"type":"form_error","text":"Choose one of these projects: " + projectList,"inputs":{"service":"Projects: " + projectList}};
 }
+people = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("people");
+	if(p != null && p.get("people") != null)
+	{
+		people = p.get("people").toMap();
+	}
+}
+catch (err)
+{
+	people = Map();
+}
+indexer = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("indexer");
+	if(p != null && p.get("indexer") != null)
+	{
+		indexer = p.get("indexer").toMap();
+	}
+}
+catch (err)
+{
+	indexer = Map();
+}
 admins = "";
 try
 {
@@ -47,15 +114,56 @@ catch (err)
 {
 	admins = "";
 }
+remindHours = "4";
+try
+{
+	p = zoho.cliq.extension.getProperties("routing");
+	if(p != null && p.get("routing") != null)
+	{
+		remindHours = ifnull(p.get("routing").toMap().get("remindhours"),4).toString();
+	}
+}
+catch (err)
+{
+	remindHours = "4";
+}
 // urgent bugs are chased sooner: blocker within 1 hour, high within 2, low after twice the usual wait
 baseHours = 4.0;
 if(remindHours.matches("[0-9]+(\\.[0-9]+)?"))
 {
 	baseHours = remindHours.toDecimal();
 }
+severityKey = severity.toString().toLowerCase();
+ticketHours = baseHours;
+if(severityKey == "blocker" && baseHours > 1)
+{
+	ticketHours = 1.0;
+}
 if(severityKey == "high" && baseHours > 2)
 {
 	ticketHours = 2.0;
+}
+if(severityKey == "low")
+{
+	ticketHours = baseHours * 2;
+}
+remindHours = ticketHours.toString();
+minConfidence = 60;
+try
+{
+	p = zoho.cliq.extension.getProperties("routing");
+	if(p != null && p.get("routing") != null)
+	{
+		minText = ifnull(p.get("routing").toMap().get("minconfidence"),"60").toString();
+		if(minText.matches("[0-9]{1,3}"))
+		{
+			minConfidence = minText.toLong();
+		}
+	}
+}
+catch (err)
+{
+	minConfidence = 60;
 }
 svcKey = svcName;
 escalateTo = "";
@@ -70,6 +178,11 @@ if(escalateTo == "")
 	escalateTo = admins;
 	escalateName = "the Conduit admins (" + admins + "), because " + svcKey + " has no team lead set";
 }
+svc = services.get(svcName);
+if(svc == null)
+{
+	return {"type":"form_error","text":"That project is no longer connected. Ask an admin to run /repo."};
+}
 owner = svc.get("owner");
 repo = svc.get("repo");
 
@@ -81,6 +194,42 @@ if(indexer.get("url") == null || indexer.get("secret") == null)
 }
 else
 {
+	routeBody = Map();
+	routeBody.put("repo",owner + "/" + repo);
+	routeBody.put("namespace",svc.get("namespace"));
+	routeBody.put("token",svc.get("token"));
+	routeBody.put("ref",ifnull(svc.get("branch"),"").toString());
+	// The indexer rejects raw line breaks, so flatten the text.
+	routeBody.put("title",bugTitle.replaceAll("\n"," ").replaceAll("\r"," ").replaceAll("\t"," "));
+	routeBody.put("description",bugDesc.replaceAll("\n"," ").replaceAll("\r"," ").replaceAll("\t"," "));
+	routeBody.put("severity",severity);
+	routeBody.put("people",people);
+	routeBody.put("ask_questions","true");
+	try
+	{
+		routeResp = invokeurl
+		[
+			url :indexer.get("url") + "/route"
+			type :POST
+			parameters:routeBody.toString()
+			headers:{"X-Conduit-Secret":indexer.get("secret"),"Content-Type":"application/json"}
+			detailed:true
+		];
+		reply = routeResp.get("responseText").toString().toMap();
+		if(routeResp.get("responseCode") == 200)
+		{
+			result = reply;
+		}
+		else
+		{
+			routeError = "Routing failed: " + ifnull(reply.get("error"),"the indexer answered " + routeResp.get("responseCode"));
+			info routeResp;
+		}
+	}
+	catch (err)
+	{
+		routeError = "Couldn't reach the indexer. If it was asleep, try again in a minute.";
+	}
 }
 files = ifnull(result.get("files"),List());
 candidates = ifnull(result.get("candidates"),List());
@@ -101,18 +250,64 @@ if(routeNotes.length() > 300)
 	routeNotes = routeNotes.subString(0,300);
 }
 
+linkedFiles = "";
+plainFiles = "";
+for each f in files
+{
+	linkedFiles = linkedFiles + "• [" + f.get("path") + "](" + f.get("url") + ") (lines " + f.get("lines") + ")\n";
+	plainFiles = plainFiles + "• " + f.get("path") + " (lines " + f.get("lines") + ")\n";
+}
 shortTitle = bugTitle;
 if(shortTitle.length() > 240)
 {
 	shortTitle = shortTitle.subString(0,240);
 }
+shortDesc = bugDesc;
+if(shortDesc.length() > 450)
+{
+	shortDesc = shortDesc.subString(0,450) + "…";
+}
+details = bugDesc;
+if(aiNote != "")
+{
+	details = details + "\n\n*AI note:* " + aiNote;
+}
 if(plainFiles != "")
 {
 	details = details + "\n\n*Likely files:*\n" + plainFiles;
 }
+fitIn = details;
+// details holds 990 characters. Trim the description and old updates first, never the file list.
+fitParts = fitIn.toString().toList("\n\n*");
 fitDesc = "";
 fitNote = "";
 fitFiles = "";
+fitUpdates = List();
+fitPartNo = 0;
+for each fitPart in fitParts
+{
+	if(fitPartNo == 0)
+	{
+		fitDesc = fitPart;
+	}
+	else if(fitPart.startsWith("AI note:*"))
+	{
+		fitNote = fitPart.getSuffix("AI note:*").trim();
+	}
+	else if(fitPart.startsWith("Likely files:*"))
+	{
+		fitFiles = fitPart.getSuffix("Likely files:*").trim();
+	}
+	else if(fitPart.contains(":*"))
+	{
+		fitUpdates.add("\n\n*" + fitPart);
+	}
+	else
+	{
+		fitDesc = fitDesc + "\n\n*" + fitPart;
+	}
+	fitPartNo = fitPartNo + 1;
+}
 fitFilesBlock = "";
 if(fitFiles != "")
 {
@@ -131,10 +326,33 @@ if(fitNote != "")
 	}
 	fitNoteBlock = "\n\n*AI note:* " + fitNote;
 }
+// Updates get at least 300 characters. When that is not enough, the oldest go first.
+fitDescLen = fitDesc.trim().length();
+if(fitDescLen > 400)
+{
+	fitDescLen = 400;
+}
 fitUpdRoom = 990 - fitFilesBlock.length() - fitNoteBlock.length() - fitDescLen;
 if(fitUpdRoom < 300)
 {
 	fitUpdRoom = 300;
+}
+fitTotal = 0;
+for each fitU in fitUpdates
+{
+	fitTotal = fitTotal + fitU.length();
+}
+fitUpdatesBlock = "";
+for each fitU2 in fitUpdates
+{
+	if(fitTotal > fitUpdRoom)
+	{
+		fitTotal = fitTotal - fitU2.length();
+	}
+	else
+	{
+		fitUpdatesBlock = fitUpdatesBlock + fitU2;
+	}
 }
 if(fitUpdatesBlock == "" && fitUpdates.size() > 0)
 {
@@ -147,9 +365,32 @@ if(fitRoom < 150)
 {
 	fitRoom = 150;
 }
+fitDesc = fitDesc.trim();
+if(fitDesc.length() > fitRoom)
+{
+	fitDesc = fitDesc.subString(0,fitRoom - 1) + "…";
+}
+fitOut = fitDesc + fitNoteBlock + fitFilesBlock + fitUpdatesBlock;
+if(fitOut.length() > 990)
+{
+	fitOut = fitOut.subString(0,990);
+}
 details = fitOut;
 whereNote = "";
 codeConf = result.get("code_confidence");
+if(codeConf != null)
+{
+	whereNote = ifnull(codeConf.get("level"),"").toString();
+	whereReason = ifnull(codeConf.get("reason"),"").toString();
+	if(whereReason != "")
+	{
+		whereNote = whereNote + ": " + whereReason;
+	}
+	if(whereNote.length() > 140)
+	{
+		whereNote = whereNote.subString(0,140);
+	}
+}
 // keep only what routing needs, so the list fits in one field
 compact = List();
 whoText = "";
@@ -183,9 +424,65 @@ for each c in candidates
 	}
 	whoText = whoText + "• " + who + "\n";
 }
+qText = "";
+for each q in askList
+{
+	if(qText != "")
+	{
+		qText = qText + " | ";
+	}
+	qText = qText + q;
+}
+if(qText.length() > 240)
+{
+	qText = qText.subString(0,240);
+}
+firstStatus = "Open";
+if(qText != "")
+{
+	firstStatus = "Needs info";
+}
+// Ticket ids are the project name plus a running number: CANTEEN-1, CANTEEN-2.
+// numbers are never reused, not even after /sweep
+counters = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("counters");
+	if(p != null && p.get("counters") != null)
+	{
+		counters = p.get("counters").toMap();
+	}
+}
+catch (err)
+{
+	counters = Map();
+}
+nextNo = 1;
+counterText = ifnull(counters.get(svcName),"").toString();
+if(counterText.matches("[0-9]{1,9}"))
+{
+	nextNo = counterText.toLong() + 1;
+}
 idPrefix = svcName.toUpperCase();
 ticketId = idPrefix + "-" + nextNo.toString();
 // Two reports at the same moment could get the same number, so skip any that are taken.
+idFree = false;
+for each idTry in {1,2,3,4,5}
+{
+	if(!idFree)
+	{
+		idCheck = zoho.cliq.getRecords(dbName,{"criteria":"ticketid==" + ticketId});
+		if(idCheck.get("status") != null && idCheck.get("status").equalsIgnoreCase("SUCCESS") && idCheck.get("list").size() > 0)
+		{
+			nextNo = nextNo + 1;
+			ticketId = idPrefix + "-" + nextNo.toString();
+		}
+		else
+		{
+			idFree = true;
+		}
+	}
+}
 counters.put(svcName,nextNo.toString());
 zoho.cliq.extension.setProperties({"counters":counters.toString()});
 recordId = "";
@@ -209,11 +506,54 @@ catch (err)
 	return {"text":"Couldn't save the ticket. Check that the conduittickets and conduitroutes databases exist with the right fields and are part of the extension."};
 }
 
+// Check whether this bug is already being tracked.
+flatTitle = bugTitle.replaceAll("\n"," ").replaceAll("\r"," ").replaceAll("\t"," ");
+flatDesc = bugDesc.replaceAll("\n"," ").replaceAll("\r"," ").replaceAll("\t"," ");
+dupRec = "";
+dupTicketId = "";
+dupTitle = "";
 dupStatus = "";
 if(indexer.get("url") != null && indexer.get("secret") != null && svc.get("namespace") != null)
 {
 	try
 	{
+		simBody = Map();
+		simBody.put("namespace",svc.get("namespace"));
+		simBody.put("title",flatTitle);
+		simBody.put("text",flatDesc);
+		simBody.put("exclude",recordId);
+		simResp = invokeurl
+		[
+			url :indexer.get("url") + "/tickets/similar"
+			type :POST
+			parameters:simBody.toString()
+			headers:{"X-Conduit-Secret":indexer.get("secret"),"Content-Type":"application/json"}
+			detailed:true
+		];
+		if(simResp.get("responseCode") == 200)
+		{
+			simList = ifnull(simResp.get("responseText").toString().toMap().get("matches"),List());
+			for each m in simList
+			{
+				if(dupRec == "")
+				{
+					// only count tickets that are still open
+					mResp = zoho.cliq.getRecordById(dbName,m.get("record_id").toString());
+					if(mResp.get("status") != null && mResp.get("status").equalsIgnoreCase("SUCCESS") && mResp.get("object") != null)
+					{
+						mTicket = mResp.get("object");
+						mStatus = ifnull(mTicket.get("status"),"").toString();
+						if(mStatus == "Open" || mStatus == "In progress" || mStatus == "Needs info" || mStatus == "Fixed")
+						{
+							dupRec = m.get("record_id").toString();
+							dupTicketId = mTicket.get("ticketid");
+							dupTitle = mTicket.get("title");
+							dupStatus = mStatus;
+						}
+					}
+				}
+			}
+		}
 	}
 	catch (err)
 	{
@@ -225,6 +565,19 @@ if(dupRec != "")
 	// hold the new report as a draft until the reporter decides
 	zoho.cliq.updateRecord(dbName,recordId,{"status":"Draft"});
 	zoho.cliq.updateRecord(routeDb,routeId,{"pending":"dup"});
+	dupStatusText = dupStatus;
+	if(dupStatus == "Open")
+	{
+		dupStatusText = "Waiting for a developer";
+	}
+	else if(dupStatus == "Needs info")
+	{
+		dupStatusText = "Waiting for details";
+	}
+	else if(dupStatus == "Fixed")
+	{
+		dupStatusText = "Fix waiting for confirmation";
+	}
 	dupRows = List();
 	dupRows.add({"Existing ticket":dupTicketId});
 	dupRows.add({"Title":dupTitle});
@@ -234,6 +587,20 @@ if(dupRec != "")
 	dupButtons.add({"label":"It's a different bug","type":"-","key":"dupnew-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitduplicate"}}});
 	dupCard = {"text":"*" + shortTitle + "*\nThis looks like a bug that's already being tracked. Join it to get its updates, or file yours separately.","card":{"title":"Already reported?","theme":"modern-inline"},"slides":{{"type":"label","data":dupRows}},"buttons":dupButtons};
 	dupSent = true;
+	try
+	{
+		dupMsg = dupCard;
+		dupMsg.put("userids",reporter);
+		dupResp = zoho.cliq.postToBot(botName,dupMsg);
+		if(dupResp != null && dupResp.get("code") != null)
+		{
+			dupSent = false;
+		}
+	}
+	catch (err)
+	{
+		dupSent = false;
+	}
 	if(dupSent)
 	{
 		if(onBehalf)
@@ -244,6 +611,30 @@ if(dupRec != "")
 	}
 	dupCard.remove("userids");
 	return dupCard;
+}
+// Not a duplicate, so remember it for future reports.
+if(indexer.get("url") != null && indexer.get("secret") != null && svc.get("namespace") != null)
+{
+	try
+	{
+		addBody = Map();
+		addBody.put("namespace",svc.get("namespace"));
+		addBody.put("record_id",recordId);
+		addBody.put("ticket_id",ticketId);
+		addBody.put("title",flatTitle);
+		addBody.put("text",flatDesc);
+		addResp = invokeurl
+		[
+			url :indexer.get("url") + "/tickets/add"
+			type :POST
+			parameters:addBody.toString()
+			headers:{"X-Conduit-Secret":indexer.get("secret"),"Content-Type":"application/json"}
+		];
+	}
+	catch (err)
+	{
+		info "could not store the ticket for duplicate checks";
+	}
 }
 
 if(fromMessage)
@@ -287,10 +678,69 @@ if(fromMessage)
 	}
 }
 
+reporterRows = List();
+reporterRows.add({"Ticket":ticketId});
+reporterRows.add({"Project":svcName});
+reporterRows.add({"Severity":severity});
+shotButton = {"label":"Add screenshots","type":"+","key":"attach-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}};
+
+// The report is thin, so ask the reporter first.
+if(qText != "")
+{
+	qLines = "";
+	for each q in askList
+	{
+		qLines = qLines + "• " + q + "\n";
+	}
+	askButtons = List();
+	askButtons.add({"label":"Answer","type":"+","key":"answer-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	askButtons.add({"label":"Route it anyway","type":"-","key":"skip-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	askButtons.add(shotButton);
+	reporterRows.add({"Status":"Waiting for your answers"});
+	askCard = {"text":"*" + shortTitle + "*\nA few details will help the right developer fix this faster:\n" + qLines,"card":{"title":"Bug reported","theme":"modern-inline"},"slides":{{"type":"label","data":reporterRows}},"buttons":askButtons};
+	// Send this as a real Flux message so it can be updated later.
+	posted = true;
+	try
+	{
+		askMsg = askCard;
+		askMsg.put("userids",reporter);
+		postResp = zoho.cliq.postToBot(botName,askMsg);
+		if(postResp != null && postResp.get("code") != null)
+		{
+			posted = false;
+		}
+	}
+	catch (err)
+	{
+		posted = false;
+	}
+	if(posted)
+	{
+		if(onBehalf)
+		{
+			return {"type":"banner","text":ticketId + " reported. " + srcName + " will get a quick question in Flux.","status":"success"};
+		}
+		return {"type":"banner","text":"Bug reported. Check Flux for a quick question.","status":"success"};
+	}
+	askCard.remove("userids");
+	return askCard;
+}
 
 tTitle = shortTitle;
 tDetails = details;
 tSeverity = severity;
+tService = svcName + " (" + owner + "/" + repo + ")";
+declined = "";
+candList = compact;
+newAssignee = "";
+for each cand in candList
+{
+	candEmail = ifnull(cand.get("cliq"),"").toString().toLowerCase();
+	if(newAssignee == "" && candEmail != "" && !declined.toList(",").contains(candEmail))
+	{
+		newAssignee = candEmail;
+	}
+}
 // Someone who left the organization cannot take the bug, so move on to the next candidate.
 // Only a clean answer from Cliq counts; if the check fails, the bug goes out as usual.
 activeDone = false;
@@ -298,6 +748,33 @@ for each activeTry in {1,2,3}
 {
 	if(!activeDone && newAssignee != "")
 	{
+		activeFound = true;
+		try
+		{
+			activeResp = invokeurl
+			[
+				url :"https://cliq.zoho.com/api/v2/users?status=active&limit=20&search=" + zoho.encryption.urlEncode(newAssignee)
+				type :GET
+				connection:"conduitcliq"
+				detailed:true
+			];
+			if(activeResp.get("responseCode").toString() == "200")
+			{
+				activeFound = false;
+				activeList = activeResp.get("responseText").toString().toMap().get("data").toString().toJSONList();
+				for each activeItem in activeList
+				{
+					if(ifnull(activeItem.toString().toMap().get("email_id"),"").toString().toLowerCase() == newAssignee)
+					{
+						activeFound = true;
+					}
+				}
+			}
+		}
+		catch (err)
+		{
+			activeFound = true;
+		}
 		if(activeFound)
 		{
 			activeDone = true;
@@ -317,9 +794,40 @@ for each activeTry in {1,2,3}
 		}
 	}
 }
+// Below the minimum confidence, the team lead picks the owner instead.
+// Candidates carry pct (confidence) and share. The first also carries where, the AI view of the code.
+chosenPct = 100;
 whereText = "";
 confWho = "";
 whoShown = 0;
+for each pc in candList
+{
+	pcEmail = ifnull(pc.get("cliq"),"").toString().toLowerCase();
+	pcPct = ifnull(pc.get("pct"),"").toString();
+	if(newAssignee != "" && pcEmail == newAssignee && pcPct.matches("[0-9]{1,3}"))
+	{
+		chosenPct = pcPct.toLong();
+	}
+	if(whereText == "")
+	{
+		whereText = ifnull(pc.get("where"),"").toString();
+	}
+	pcShare = ifnull(pc.get("share"),"").toString();
+	if(whoShown < 3 && pcShare != "")
+	{
+		pcLabel = ifnull(pc.get("name"),"").toString();
+		if(pcEmail != "")
+		{
+			pcLabel = pcLabel + " (" + pcEmail + ")";
+		}
+		else
+		{
+			pcLabel = pcLabel + ", not linked";
+		}
+		confWho = confWho + "\n   " + pcLabel + ": " + pcShare + "% of the matched code";
+		whoShown = whoShown + 1;
+	}
+}
 lowConfidence = false;
 if(newAssignee != "" && chosenPct < minConfidence)
 {
@@ -344,12 +852,66 @@ if(lowConfidence)
 	}
 	confText = "\n\n*Routing confidence:* " + meter + " " + chosenPct.toString() + "% (minimum " + minConfidence.toString() + "%)";
 }
+if(whereText != "")
+{
+	confText = confText + "\n• *Where:* " + whereText;
+}
+if(confWho != "")
+{
+	confText = confText + "\n• *Who:*" + confWho;
+}
+reporterLine = reporter;
+if(onBehalf)
+{
+	reporterLine = reporter + " (filed by " + clicker + ")";
+}
 tcSvc = svc;
 tcProjectName = svcName;
 tcReporter = reporterLine;
+tcNotes = routeNotes;
+tcAssignee = "";
+// Ticket card: title and description as text, everything else as slides.
+// details is the description followed by sections like *AI note:* and *Likely files:*
+tcAll = tDetails.toString();
+tcParts = tcAll.toList("\n\n*");
 tcDesc = "";
 tcNote = "";
 tcFileText = "";
+tcExtra = "";
+tcPartNo = 0;
+for each tcPart in tcParts
+{
+	if(tcPartNo == 0)
+	{
+		tcDesc = tcPart;
+	}
+	else if(tcPart.contains(":*"))
+	{
+		tcHead = tcPart.getPrefix(":*");
+		tcBody = tcPart.getSuffix(":*").trim();
+		if(tcHead == "AI note")
+		{
+			tcNote = tcBody;
+		}
+		else if(tcHead == "Likely files")
+		{
+			tcFileText = tcBody;
+		}
+		else
+		{
+			if(tcExtra != "")
+			{
+				tcExtra = tcExtra + "\n\n";
+			}
+			tcExtra = tcExtra + "*" + tcHead + ":* " + tcBody;
+		}
+	}
+	else
+	{
+		tcDesc = tcDesc + "\n\n*" + tcPart;
+	}
+	tcPartNo = tcPartNo + 1;
+}
 tcText = "*" + tTitle.toString() + "*\n" + tcDesc;
 tcRepoPath = "";
 tcRef = "HEAD";
@@ -373,12 +935,60 @@ if(tcAssignee != "" && tcAssignee != "unassigned")
 {
 	tcDetailRows.add({"Assigned to":tcAssignee});
 }
+if(tcNotes != "")
+{
+	tcDetailRows.add({"Routing notes":tcNotes});
+}
 tcDetailSlide = Map();
 tcDetailSlide.put("type","label");
 tcDetailSlide.put("title","Details");
+tcDetailSlide.put("data",tcDetailRows);
+tcBaseSlides.add(tcDetailSlide);
+if(tcNote != "")
+{
+	tcNoteSlide = Map();
+	tcNoteSlide.put("type","text");
+	tcNoteSlide.put("title","AI note");
+	tcNoteSlide.put("data",tcNote);
+	tcBaseSlides.add(tcNoteSlide);
+}
 // Each file line looks like "path (lines 1-20)". Link it when we know the repo.
 tcFileItems = List();
 tcFileLines = tcFileText.toList("\n");
+for each tcLine in tcFileLines
+{
+	tcItem = tcLine.trim();
+	if(tcItem.startsWith("•"))
+	{
+		tcItem = tcItem.subString(1).trim();
+	}
+	if(tcItem != "")
+	{
+		tcPath = tcItem;
+		tcLines = "";
+		if(tcItem.contains(" (lines ") && tcItem.endsWith(")"))
+		{
+			tcPath = tcItem.getPrefix(" (lines ");
+			tcLines = tcItem.getSuffix(" (lines ");
+			tcLines = tcLines.subString(0,tcLines.length() - 1);
+		}
+		tcShown = tcPath;
+		if(tcRepoPath != "")
+		{
+			tcUrl = "https://github.com/" + tcRepoPath + "/blob/" + tcRef + "/" + tcPath;
+			if(tcLines != "")
+			{
+				tcUrl = tcUrl + "#L" + tcLines.replaceAll("-","-L");
+			}
+			tcShown = "[" + tcPath + "](" + tcUrl + ")";
+		}
+		if(tcLines != "")
+		{
+			tcShown = tcShown + " · lines " + tcLines;
+		}
+		tcFileItems.add(tcShown);
+	}
+}
 if(tcFileItems.size() > 0)
 {
 	tcFileSlide = Map();
@@ -400,6 +1010,45 @@ tcOwnerDev = List();
 tcOwnerLead = List();
 for each tcOc in candList
 {
+	if(tcOwnerDev.size() < 4)
+	{
+		tcOcKey = ifnull(tcOc.get("key"),"").toString();
+		tcOcGithub = tcOcKey;
+		if(tcOcKey != "" && !tcOcKey.contains("@"))
+		{
+			tcOcGithub = "@" + tcOcKey;
+		}
+		tcOcName = ifnull(tcOc.get("name"),"").toString();
+		if(tcOcName == "")
+		{
+			tcOcName = tcOcKey;
+		}
+		tcOcCliq = ifnull(tcOc.get("cliq"),"").toString();
+		if(tcOcCliq == "")
+		{
+			tcOcCliq = "Not linked";
+		}
+		tcOcShare = ifnull(tcOc.get("share"),"").toString();
+		if(tcOcShare == "")
+		{
+			tcOcShare = "—";
+		}
+		else
+		{
+			tcOcShare = tcOcShare + "%";
+		}
+		tcDevRow = Map();
+		tcDevRow.put("Developer",tcOcName);
+		tcDevRow.put("GitHub",tcOcGithub);
+		tcDevRow.put("Cliq user",tcOcCliq);
+		tcOwnerDev.add(tcDevRow);
+		tcLeadRow = Map();
+		tcLeadRow.put("Developer",tcOcName);
+		tcLeadRow.put("GitHub",tcOcGithub);
+		tcLeadRow.put("Cliq user",tcOcCliq);
+		tcLeadRow.put("Share",tcOcShare);
+		tcOwnerLead.add(tcLeadRow);
+	}
 }
 tcSlides = List();
 tcSlides.addAll(tcBaseSlides);
@@ -432,6 +1081,25 @@ openButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"ac
 routeOutcome = "";
 if(newAssignee != "")
 {
+	delivered = true;
+	try
+	{
+		dmMsg = Map();
+		dmMsg.put("text",cardText);
+		dmMsg.put("slides",tcSlides);
+		dmMsg.put("card",{"title":ticketId + " · New bug for you","theme":"modern-inline"});
+		dmMsg.put("buttons",openButtons);
+		dmMsg.put("userids",newAssignee);
+		dmResp = zoho.cliq.postToBot(botName,dmMsg);
+		if(dmResp != null && dmResp.get("code") != null)
+		{
+			delivered = false;
+		}
+	}
+	catch (err)
+	{
+		delivered = false;
+	}
 	if(delivered)
 	{
 		zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":newAssignee});
@@ -461,6 +1129,66 @@ if(newAssignee != "")
 }
 if(newAssignee == "")
 {
+	zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":"unassigned"});
+	leadTitle = ticketId + " · Needs an owner";
+	leadText = cardText;
+	// Lead card: the confidence goes before the owners table.
+	tcConfRows = List();
+	if(lowConfidence)
+	{
+		tcFilled = (chosenPct.toDecimal() / 10).round(0);
+		tcMeter = "";
+		for each tcStep in {1,2,3,4,5,6,7,8,9,10}
+		{
+			if(tcStep <= tcFilled)
+			{
+				tcMeter = tcMeter + "▰";
+			}
+			else
+			{
+				tcMeter = tcMeter + "▱";
+			}
+		}
+		tcConfRows.add({"Confidence":tcMeter + " " + chosenPct.toString() + "% (minimum " + minConfidence.toString() + "%)"});
+	}
+	if(whereText != "")
+	{
+		tcWhere = whereText;
+		if(tcWhere.length() > 1)
+		{
+			tcWhere = tcWhere.subString(0,1).toUpperCase() + tcWhere.subString(1);
+		}
+		tcConfRows.add({"Where":tcWhere});
+	}
+	// Sum up the top two candidates in one line.
+	tcVerdict = "";
+	if(candList.size() > 0)
+	{
+		tcFirst = candList.get(0);
+		tcFirstName = ifnull(tcFirst.get("name"),"").toString();
+		tcFirstShare = ifnull(tcFirst.get("share"),"").toString();
+		if(ifnull(tcFirst.get("cliq"),"").toString() == "")
+		{
+			tcVerdict = "Most of the code is by " + tcFirstName + ", who is not linked to a Cliq user";
+		}
+		else if(candList.size() > 1)
+		{
+			tcSecond = candList.get(1);
+			tcSecondShare = ifnull(tcSecond.get("share"),"").toString();
+			tcVerdict = tcFirstName + " " + tcFirstShare + "%, " + ifnull(tcSecond.get("name"),"").toString() + " " + tcSecondShare + "%";
+			if(tcFirstShare.matches("[0-9]{1,3}") && tcSecondShare.matches("[0-9]{1,3}"))
+			{
+				if(tcFirstShare.toLong() - tcSecondShare.toLong() < 15)
+				{
+					tcVerdict = "Close call: " + tcVerdict;
+				}
+			}
+		}
+		else if(tcFirstShare != "")
+		{
+			tcVerdict = "Clear owner: " + tcFirstName + " has " + tcFirstShare + "% of the matched code";
+		}
+	}
 	if(tcVerdict != "")
 	{
 		tcConfRows.add({"Who":tcVerdict});
@@ -486,6 +1214,40 @@ if(newAssignee == "")
 	leadButtons = List();
 	if(lowConfidence)
 	{
+		// Close call: let the lead pick from the likely owners.
+		leadTitle = ticketId + " · Who should own this?";
+		assignShown = 0;
+		candIndex = 0;
+		for each ac in candList
+		{
+			acEmail = ifnull(ac.get("cliq"),"").toString().toLowerCase();
+			if(assignShown < 2 && acEmail != "" && !declined.toList(",").contains(acEmail))
+			{
+				acName = ifnull(ac.get("name"),"").toString().trim();
+				if(acName == "")
+				{
+					acName = acEmail.getPrefix("@");
+				}
+				if(acName.contains(" "))
+				{
+					acName = acName.getPrefix(" ");
+				}
+				// Buttons hold about 20 characters, so only really long names get shortened.
+				if(acName.length() > 13)
+				{
+					acName = acName.subString(0,12) + "…";
+				}
+				acLabel = "Assign " + acName;
+				assignButton = Map();
+				assignButton.put("label",acLabel);
+				assignButton.put("type","+");
+				assignButton.put("key","assignto-" + recordId + "-" + candIndex.toString());
+				assignButton.put("action",{"type":"invoke.function","data":{"name":"conduitticketaction"}});
+				leadButtons.add(assignButton);
+				assignShown = assignShown + 1;
+			}
+			candIndex = candIndex + 1;
+		}
 		for each b in openButtons
 		{
 			bKey = b.get("key");
@@ -506,6 +1268,25 @@ if(newAssignee == "")
 			}
 		}
 	}
+	adminsDelivered = true;
+	try
+	{
+		dmMsg = Map();
+		dmMsg.put("text",leadText);
+		dmMsg.put("slides",tcDecideSlides);
+		dmMsg.put("card",{"title":leadTitle,"theme":"modern-inline"});
+		dmMsg.put("buttons",leadButtons);
+		dmMsg.put("userids",escalateTo);
+		dmResp = zoho.cliq.postToBot(botName,dmMsg);
+		if(dmResp != null && dmResp.get("code") != null)
+		{
+			adminsDelivered = false;
+		}
+	}
+	catch (err)
+	{
+		adminsDelivered = false;
+	}
 	routeOutcome = "With the " + svcName + " team";
 }
 // Conduit stats: who the bug went to first.
@@ -524,6 +1305,35 @@ else
 		stMap.put("v","lead");
 	}
 }
+// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+stText = "";
+for each stKey in stMap.keys()
+{
+	if(stText != "")
+	{
+		stText = stText + ";";
+	}
+	stText = stText + stKey + "=" + stMap.get(stKey).toString();
+}
+stMetaText = "";
+stIndex = 0;
+for each stPart in meta
+{
+	if(stIndex < 7 && !stPart.startsWith("S:"))
+	{
+		stValue = stPart;
+		if(stIndex == 6 && stValue == "")
+		{
+			stValue = "-";
+		}
+		if(stIndex > 0)
+		{
+			stMetaText = stMetaText + ",";
+		}
+		stMetaText = stMetaText + stValue;
+		stIndex = stIndex + 1;
+	}
+}
 if(stIndex == 6)
 {
 	stMetaText = stMetaText + ",-";
@@ -540,7 +1350,44 @@ if(stIndex == 7)
 		info "stats not saved";
 	}
 }
+if(routeId != "")
+{
+	zoho.cliq.updateRecord(routeDb,routeId,{"declined":declined,"pending":"","reminders":0,"changedat":nowMs});
+}
 reporterRows.add({"Status":routeOutcome});
 reporterButtons = List();
 reporterButtons.add(shotButton);
+reporterCard = {"text":"*" + shortTitle + "*\nYou'll be notified here when a developer picks it up.","card":{"title":"Bug reported","theme":"modern-inline"},"slides":{{"type":"label","data":reporterRows}},"buttons":reporterButtons};
+if(fromMessage)
+{
+	// From a chat message: the reporter gets the card in Flux, whoever clicked gets a banner.
+	if(onBehalf)
+	{
+		reporterCard.put("text","*" + shortTitle + "*\n" + clickerName + " reported this from your message. You'll be notified here when a developer picks it up.");
+	}
+	cardSent = true;
+	try
+	{
+		reporterMsg = reporterCard;
+		reporterMsg.put("userids",reporter);
+		cardResp = zoho.cliq.postToBot(botName,reporterMsg);
+		if(cardResp != null && cardResp.get("code") != null)
+		{
+			cardSent = false;
+		}
+	}
+	catch (err)
+	{
+		cardSent = false;
+	}
+	if(cardSent)
+	{
+		if(onBehalf)
+		{
+			return {"type":"banner","text":ticketId + " reported. " + srcName + " will get updates in Flux.","status":"success"};
+		}
+		return {"type":"banner","text":ticketId + " reported. You'll get updates in Flux.","status":"success"};
+	}
+	reporterCard.remove("userids");
+}
 return reporterCard;
