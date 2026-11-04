@@ -1,0 +1,1559 @@
+// conduitticketaction: every button on a ticket card. Keys look like <action>-<record id>.
+botName = "flux";
+dbName = "conduittickets";
+routeDb = "conduitroutes";
+nowMs = zoho.currenttime.toLong();
+key = arguments.get("key");
+keyParts = key.toList("-");
+op = keyParts.get(0);
+recordId = keyParts.get(1);
+me = user.get("email").toLowerCase();
+myName = user.get("first_name");
+admins = "";
+try
+{
+	p = zoho.cliq.extension.getProperties("admins");
+	if(p != null && p.get("admins") != null)
+	{
+		admins = p.get("admins").toString();
+	}
+}
+catch (err)
+{
+	admins = "";
+}
+isAdmin = admins.toLowerCase().toList(",").contains(me);
+ticketResp = zoho.cliq.getRecordById(dbName,recordId);
+if(ticketResp.get("status") == null || !ticketResp.get("status").equalsIgnoreCase("SUCCESS") || ticketResp.get("object") == null)
+{
+	return {"text":"Couldn't find that ticket any more."};
+}
+ticket = ticketResp.get("object");
+ticketId = ticket.get("ticketid");
+status = ticket.get("status");
+assignee = ifnull(ticket.get("assignee"),"unassigned");
+tTitle = ticket.get("title");
+tDetails = ifnull(ticket.get("details"),"");
+// meta: severity, project, chat, reporter, escalate to, reminder hours, followers
+meta = ticket.get("meta").toList();
+// The stats record lives in meta field 8 as S:key=value;key=value
+stMap = Map();
+for each stPart in meta
+{
+	if(stPart.startsWith("S:"))
+	{
+		stPairs = stPart.subString(2).toList(";");
+		for each stPair in stPairs
+		{
+			if(stPair.contains("="))
+			{
+				stMap.put(stPair.getPrefix("="),stPair.getSuffix("="));
+			}
+		}
+	}
+}
+tSeverity = meta.get(0);
+tService = meta.get(1);
+originChat = meta.get(2);
+reporter = meta.get(3);
+// Field 7 lists people who reported the same bug and joined this ticket.
+followers = "";
+if(meta.size() > 6)
+{
+	followers = meta.get(6).replaceAll(";",",");
+}
+// "-" marks an empty follower list when the stats record follows it
+if(followers == "-")
+{
+	followers = "";
+}
+label = ticketId + " (" + tTitle + ")";
+routeId = "";
+candList = List();
+declined = "";
+pending = "";
+questions = "";
+reminders = 0;
+routeResp = zoho.cliq.getRecords(routeDb,{"criteria":"ticketrec==" + recordId});
+if(routeResp.get("status") != null && routeResp.get("status").equalsIgnoreCase("SUCCESS") && routeResp.get("list").size() > 0)
+{
+	routeRec = routeResp.get("list").get(0);
+	routeId = routeRec.get("id").toString();
+	declined = ifnull(routeRec.get("declined"),"").toString();
+	pending = ifnull(routeRec.get("pending"),"").toString();
+	questions = ifnull(routeRec.get("questions"),"").toString();
+	reminders = ifnull(routeRec.get("reminders"),0).toLong();
+	try
+	{
+		candList = routeRec.get("candidates").toString().toJSONList();
+	}
+	catch (err)
+	{
+		candList = List();
+	}
+}
+services = Map();
+try
+{
+	p = zoho.cliq.extension.getProperties("services");
+	if(p != null && p.get("services") != null)
+	{
+		services = p.get("services").toMap();
+	}
+}
+catch (err)
+{
+	services = Map();
+}
+svcKey = tService;
+escalateTo = "";
+leadSvc = services.get(svcKey);
+if(leadSvc != null)
+{
+	escalateTo = ifnull(leadSvc.get("teamlead"),"").toString().trim().toLowerCase();
+}
+escalateName = "the " + svcKey + " team lead (" + escalateTo + ")";
+if(escalateTo == "")
+{
+	escalateTo = admins;
+	escalateName = "the Conduit admins (" + admins + "), because " + svcKey + " has no team lead set";
+}
+isOwner = assignee == me;
+unassigned = assignee == "unassigned";
+tcSvc = Map();
+if(leadSvc != null)
+{
+	tcSvc = leadSvc;
+}
+tcProjectName = tService;
+tcReporter = reporter;
+tcNotes = "";
+tcAssignee = assignee;
+// Ticket card: title and description as text, everything else as slides.
+// details is the description followed by sections like *AI note:* and *Likely files:*
+tcAll = tDetails.toString();
+tcParts = tcAll.toList("\n\n*");
+tcDesc = "";
+tcNote = "";
+tcFileText = "";
+tcExtra = "";
+tcPartNo = 0;
+for each tcPart in tcParts
+{
+	if(tcPartNo == 0)
+	{
+		tcDesc = tcPart;
+	}
+	else if(tcPart.contains(":*"))
+	{
+		tcHead = tcPart.getPrefix(":*");
+		tcBody = tcPart.getSuffix(":*").trim();
+		if(tcHead == "AI note")
+		{
+			tcNote = tcBody;
+		}
+		else if(tcHead == "Likely files")
+		{
+			tcFileText = tcBody;
+		}
+		else
+		{
+			if(tcExtra != "")
+			{
+				tcExtra = tcExtra + "\n\n";
+			}
+			tcExtra = tcExtra + "*" + tcHead + ":* " + tcBody;
+		}
+	}
+	else
+	{
+		tcDesc = tcDesc + "\n\n*" + tcPart;
+	}
+	tcPartNo = tcPartNo + 1;
+}
+tcText = "*" + tTitle.toString() + "*\n" + tcDesc;
+tcRepoPath = "";
+tcRef = "HEAD";
+tcProject = tcProjectName;
+if(tcSvc.get("owner") != null && tcSvc.get("repo") != null)
+{
+	tcRepoPath = tcSvc.get("owner").toString() + "/" + tcSvc.get("repo").toString();
+	tcProject = tcProjectName + " (" + tcRepoPath + ")";
+	tcBranch = ifnull(tcSvc.get("branch"),"").toString();
+	if(tcBranch != "")
+	{
+		tcRef = tcBranch;
+	}
+}
+tcBaseSlides = List();
+tcDetailRows = List();
+tcDetailRows.add({"Project":tcProject});
+tcDetailRows.add({"Severity":tSeverity.toString()});
+tcDetailRows.add({"Reported by":tcReporter});
+if(tcAssignee != "" && tcAssignee != "unassigned")
+{
+	tcDetailRows.add({"Assigned to":tcAssignee});
+}
+if(tcNotes != "")
+{
+	tcDetailRows.add({"Routing notes":tcNotes});
+}
+tcDetailSlide = Map();
+tcDetailSlide.put("type","label");
+tcDetailSlide.put("title","Details");
+tcDetailSlide.put("data",tcDetailRows);
+tcBaseSlides.add(tcDetailSlide);
+if(tcNote != "")
+{
+	tcNoteSlide = Map();
+	tcNoteSlide.put("type","text");
+	tcNoteSlide.put("title","AI note");
+	tcNoteSlide.put("data",tcNote);
+	tcBaseSlides.add(tcNoteSlide);
+}
+// Each file line looks like "path (lines 1-20)". Link it when we know the repo.
+tcFileItems = List();
+tcFileLines = tcFileText.toList("\n");
+for each tcLine in tcFileLines
+{
+	tcItem = tcLine.trim();
+	if(tcItem.startsWith("•"))
+	{
+		tcItem = tcItem.subString(1).trim();
+	}
+	if(tcItem != "")
+	{
+		tcPath = tcItem;
+		tcLines = "";
+		if(tcItem.contains(" (lines ") && tcItem.endsWith(")"))
+		{
+			tcPath = tcItem.getPrefix(" (lines ");
+			tcLines = tcItem.getSuffix(" (lines ");
+			tcLines = tcLines.subString(0,tcLines.length() - 1);
+		}
+		tcShown = tcPath;
+		if(tcRepoPath != "")
+		{
+			tcUrl = "https://github.com/" + tcRepoPath + "/blob/" + tcRef + "/" + tcPath;
+			if(tcLines != "")
+			{
+				tcUrl = tcUrl + "#L" + tcLines.replaceAll("-","-L");
+			}
+			tcShown = "[" + tcPath + "](" + tcUrl + ")";
+		}
+		if(tcLines != "")
+		{
+			tcShown = tcShown + " · lines " + tcLines;
+		}
+		tcFileItems.add(tcShown);
+	}
+}
+if(tcFileItems.size() > 0)
+{
+	tcFileSlide = Map();
+	tcFileSlide.put("type","list");
+	tcFileSlide.put("title","Likely files");
+	tcFileSlide.put("data",tcFileItems);
+	tcBaseSlides.add(tcFileSlide);
+}
+if(tcExtra != "")
+{
+	tcExtraSlide = Map();
+	tcExtraSlide.put("type","text");
+	tcExtraSlide.put("title","Updates");
+	tcExtraSlide.put("data",tcExtra);
+	tcBaseSlides.add(tcExtraSlide);
+}
+// Team leads also see how much of the code each person wrote.
+tcOwnerDev = List();
+tcOwnerLead = List();
+for each tcOc in candList
+{
+	if(tcOwnerDev.size() < 4)
+	{
+		tcOcKey = ifnull(tcOc.get("key"),"").toString();
+		tcOcGithub = tcOcKey;
+		if(tcOcKey != "" && !tcOcKey.contains("@"))
+		{
+			tcOcGithub = "@" + tcOcKey;
+		}
+		tcOcName = ifnull(tcOc.get("name"),"").toString();
+		if(tcOcName == "")
+		{
+			tcOcName = tcOcKey;
+		}
+		tcOcCliq = ifnull(tcOc.get("cliq"),"").toString();
+		if(tcOcCliq == "")
+		{
+			tcOcCliq = "Not linked";
+		}
+		tcOcShare = ifnull(tcOc.get("share"),"").toString();
+		if(tcOcShare == "")
+		{
+			tcOcShare = "—";
+		}
+		else
+		{
+			tcOcShare = tcOcShare + "%";
+		}
+		tcDevRow = Map();
+		tcDevRow.put("Developer",tcOcName);
+		tcDevRow.put("GitHub",tcOcGithub);
+		tcDevRow.put("Cliq user",tcOcCliq);
+		tcOwnerDev.add(tcDevRow);
+		tcLeadRow = Map();
+		tcLeadRow.put("Developer",tcOcName);
+		tcLeadRow.put("GitHub",tcOcGithub);
+		tcLeadRow.put("Cliq user",tcOcCliq);
+		tcLeadRow.put("Share",tcOcShare);
+		tcOwnerLead.add(tcLeadRow);
+	}
+}
+tcSlides = List();
+tcSlides.addAll(tcBaseSlides);
+tcLeadSlides = List();
+tcLeadSlides.addAll(tcBaseSlides);
+if(tcOwnerDev.size() > 0)
+{
+	tcDevTable = Map();
+	tcDevTable.put("type","table");
+	tcDevTable.put("title","Likely owners");
+	tcDevTable.put("data",{"headers":{"Developer","GitHub","Cliq user"},"rows":tcOwnerDev});
+	tcSlides.add(tcDevTable);
+	tcLeadTable = Map();
+	tcLeadTable.put("type","table");
+	tcLeadTable.put("title","Likely owners");
+	tcLeadTable.put("data",{"headers":{"Developer","GitHub","Cliq user","Share"},"rows":tcOwnerLead});
+	tcLeadSlides.add(tcLeadTable);
+}
+cardInfo = tcText;
+
+statusWords = status.toLowerCase();
+if(status == "Needs info")
+{
+	statusWords = "waiting for the reporter's answer";
+}
+if(status == "Fixed")
+{
+	statusWords = "marked fixed and waiting for the reporter";
+}
+if(status == "Won't fix")
+{
+	statusWords = "closed as won't fix";
+}
+if(status == "Closed" || status == "Won't fix")
+{
+	return {"text":label + " is already " + statusWords + "."};
+}
+if(status == "Merged")
+{
+	return {"text":ticketId + " was merged into another ticket, so this card no longer applies."};
+}
+
+// Assign: the team lead picks the owner of a low-confidence bug.
+// key: assignto-<record id>-<position in the candidate list>
+if(op == "assignto")
+{
+	leadList = escalateTo.replaceAll(" ","").toLowerCase().toList(",");
+	if(!leadList.contains(me) && !isAdmin)
+	{
+		return {"text":"Only " + escalateName + " can choose who owns " + ticketId + "."};
+	}
+	if(status != "Open" || !unassigned)
+	{
+		return {"text":label + " is already " + status.toLowerCase() + " with " + assignee + "."};
+	}
+	pickIndex = -1;
+	if(keyParts.size() > 2 && keyParts.get(2).matches("[0-9]{1,2}"))
+	{
+		pickIndex = keyParts.get(2).toLong();
+	}
+	if(pickIndex < 0 || pickIndex >= candList.size())
+	{
+		return {"text":"That developer is no longer on the list for " + ticketId + ". Use Forward instead."};
+	}
+	pickCand = candList.get(pickIndex);
+	pickEmail = ifnull(pickCand.get("cliq"),"").toString().toLowerCase();
+	pickName = ifnull(pickCand.get("name"),"").toString();
+	if(pickName == "")
+	{
+		pickName = pickEmail;
+	}
+	if(pickEmail == "")
+	{
+		return {"text":pickName + " isn't linked to a Cliq user. Use Forward instead."};
+	}
+	cardText = tcText;
+	openButtons = List();
+	openButtons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	delivered = true;
+	try
+	{
+		dmMsg = Map();
+		dmMsg.put("text",cardText);
+		dmMsg.put("slides",tcSlides);
+		dmMsg.put("card",{"title":ticketId + " · New bug for you","theme":"modern-inline"});
+		dmMsg.put("buttons",openButtons);
+		dmMsg.put("userids",pickEmail);
+		dmResp = zoho.cliq.postToBot(botName,dmMsg);
+		if(dmResp != null && dmResp.get("code") != null)
+		{
+			delivered = false;
+		}
+	}
+	catch (err)
+	{
+		delivered = false;
+	}
+	if(!delivered)
+	{
+		return {"text":pickEmail + " couldn't be messaged (not subscribed to Flux). Choose someone else or use Forward."};
+	}
+	topEmail = "";
+	for each topCand in candList
+	{
+		topCandEmail = ifnull(topCand.get("cliq"),"").toString().toLowerCase();
+		if(topEmail == "" && topCandEmail != "" && !declined.toList(",").contains(topCandEmail))
+		{
+			topEmail = topCandEmail;
+		}
+	}
+	if(ifnull(stMap.get("pk"),"").toString() == "")
+	{
+		if(pickEmail == topEmail)
+		{
+			stMap.put("pk","top");
+		}
+		else
+		{
+			stMap.put("pk","other");
+		}
+	}
+	zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":pickEmail});
+	// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+	stText = "";
+	for each stKey in stMap.keys()
+	{
+		if(stText != "")
+		{
+			stText = stText + ";";
+		}
+		stText = stText + stKey + "=" + stMap.get(stKey).toString();
+	}
+	stMetaText = "";
+	stIndex = 0;
+	for each stPart in meta
+	{
+		if(stIndex < 7 && !stPart.startsWith("S:"))
+		{
+			stValue = stPart;
+			if(stIndex == 6 && stValue == "")
+			{
+				stValue = "-";
+			}
+			if(stIndex > 0)
+			{
+				stMetaText = stMetaText + ",";
+			}
+			stMetaText = stMetaText + stValue;
+			stIndex = stIndex + 1;
+		}
+	}
+	if(stIndex == 6)
+	{
+		stMetaText = stMetaText + ",-";
+		stIndex = 7;
+	}
+	if(stIndex == 7)
+	{
+		try
+		{
+			zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText});
+		}
+		catch (err)
+		{
+			info "stats not saved";
+		}
+	}
+	if(routeId != "")
+	{
+		zoho.cliq.updateRecord(routeDb,routeId,{"reminders":0,"changedat":nowMs});
+	}
+	noteMsg = {"text":"👤 " + label + " was assigned to " + pickEmail + " by " + myName + "."};
+	sent = true;
+	try
+	{
+		notifyResp = zoho.cliq.postToChat(originChat,noteMsg);
+		if(notifyResp != null && notifyResp.get("code") != null)
+		{
+			sent = false;
+		}
+	}
+	catch (err)
+	{
+		sent = false;
+	}
+	if(!sent)
+	{
+		try
+		{
+			noteMsg.put("userids",reporter);
+			zoho.cliq.postToBot(botName,noteMsg);
+		}
+		catch (err)
+		{
+			info "could not notify the reporter";
+		}
+	}
+	return {"type":"message_edit","text":cardInfo + "\n\n👤 *Assigned to " + pickName + " (" + pickEmail + ") by you.*","card":{"title":ticketId + " · Assigned","theme":"modern-inline"},"slides":tcSlides};
+}
+
+if(op == "attach")
+{
+	// Screenshots sent to Flux in the next 30 minutes go to this report.
+	if(me != reporter)
+	{
+		return {"text":"Only the reporter can add screenshots to " + ticketId + "."};
+	}
+	attachMap = Map();
+	try
+	{
+		p = zoho.cliq.extension.getProperties("attach");
+		if(p != null && p.get("attach") != null)
+		{
+			attachMap = p.get("attach").toMap();
+		}
+	}
+	catch (err)
+	{
+		attachMap = Map();
+	}
+	// drop expired choices so the setting stays small
+	fresh = Map();
+	for each who in attachMap.keys()
+	{
+		pick = attachMap.get(who);
+		if(pick.get("until").toLong() > nowMs)
+		{
+			fresh.put(who,pick);
+		}
+	}
+	fresh.put(me,{"rec":recordId,"until":nowMs + 1800000});
+	zoho.cliq.extension.setProperties({"attach":fresh.toString()});
+	return {"text":"📎 *Open your chat with Flux* and send the screenshots for *" + ticketId + "* · " + tTitle + " there. Images posted in channels can't be attached. Anything you send to Flux in the next 30 minutes is added to this report."};
+}
+else if(op == "accept")
+{
+	if(status == "In progress" && isOwner)
+	{
+		return {"text":"You already accepted " + label + "."};
+	}
+	if(status != "Open")
+	{
+		return {"text":label + " is " + statusWords + ", so it can't be accepted now."};
+	}
+	if(!isOwner && !unassigned)
+	{
+		return {"text":label + " is assigned to " + assignee + "."};
+	}
+	if(ifnull(stMap.get("a"),"").toString() == "")
+	{
+		stMap.put("a",nowMs.toString());
+		stMap.put("by",me);
+	}
+	if(ifnull(stMap.get("f"),"").toString() == "lead" && ifnull(stMap.get("pk"),"").toString() == "")
+	{
+		stMap.put("pk","self");
+	}
+	zoho.cliq.updateRecord(dbName,recordId,{"status":"In progress","assignee":me});
+	// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+	stText = "";
+	for each stKey in stMap.keys()
+	{
+		if(stText != "")
+		{
+			stText = stText + ";";
+		}
+		stText = stText + stKey + "=" + stMap.get(stKey).toString();
+	}
+	stMetaText = "";
+	stIndex = 0;
+	for each stPart in meta
+	{
+		if(stIndex < 7 && !stPart.startsWith("S:"))
+		{
+			stValue = stPart;
+			if(stIndex == 6 && stValue == "")
+			{
+				stValue = "-";
+			}
+			if(stIndex > 0)
+			{
+				stMetaText = stMetaText + ",";
+			}
+			stMetaText = stMetaText + stValue;
+			stIndex = stIndex + 1;
+		}
+	}
+	if(stIndex == 6)
+	{
+		stMetaText = stMetaText + ",-";
+		stIndex = 7;
+	}
+	if(stIndex == 7)
+	{
+		try
+		{
+			zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText});
+		}
+		catch (err)
+		{
+			info "stats not saved";
+		}
+	}
+	if(routeId != "")
+	{
+		zoho.cliq.updateRecord(routeDb,routeId,{"reminders":0,"changedat":nowMs});
+	}
+	note = "✅ " + label + " accepted by " + myName + ".";
+	noteMsg = {"text":note};
+	sent = true;
+	try
+	{
+		notifyResp = zoho.cliq.postToChat(originChat,noteMsg);
+		if(notifyResp != null && notifyResp.get("code") != null)
+		{
+			sent = false;
+		}
+	}
+	catch (err)
+	{
+		sent = false;
+	}
+	if(!sent)
+	{
+		try
+		{
+			noteMsg.put("userids",reporter);
+			zoho.cliq.postToBot(botName,noteMsg);
+		}
+		catch (err)
+		{
+			info "could not notify the reporter";
+		}
+	}
+	if(followers != "")
+	{
+		try
+		{
+			zoho.cliq.postToBot(botName,{"text":"✅ " + label + ", which you also reported, was accepted by " + myName + ".","userids":followers});
+		}
+		catch (err)
+		{
+			info "could not notify followers";
+		}
+	}
+	workButtons = List();
+	workButtons.add({"label":"Mark fixed","type":"+","key":"fixed-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	workButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	return {"type":"message_edit","text":cardInfo + "\n\n✅ *Accepted by you.* Click *Mark fixed* when the fix is in.","card":{"title":ticketId + " · In progress","theme":"modern-inline"},"buttons":workButtons,"slides":tcSlides};
+}
+else if(op == "notmine")
+{
+	passedOn = declined.toLowerCase().toList(",");
+	if(passedOn.contains(me))
+	{
+		return {"text":"You already passed " + label + " on."};
+	}
+	if(unassigned)
+	{
+		return {"text":"Nobody owns " + label + " yet, so there's no one to pass it back from. Accept it, forward it to a developer, or close it as won't fix."};
+	}
+	if(!isOwner)
+	{
+		return {"text":label + " is assigned to " + assignee + "."};
+	}
+	if(status != "Open" && status != "In progress")
+	{
+		return {"text":label + " is " + statusWords + ", so this can't be done now."};
+	}
+	declined = declined + "," + me;
+	stMap.put("nm",(ifnull(stMap.get("nm"),"0").toString().toLong() + 1).toString());
+	stPassed = ifnull(stMap.get("d"),"").toString();
+	if(!stPassed.toList("|").contains(me))
+	{
+		if(stPassed != "")
+		{
+			stPassed = stPassed + "|";
+		}
+		stMap.put("d",stPassed + me);
+	}
+	// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+	stText = "";
+	for each stKey in stMap.keys()
+	{
+		if(stText != "")
+		{
+			stText = stText + ";";
+		}
+		stText = stText + stKey + "=" + stMap.get(stKey).toString();
+	}
+	stMetaText = "";
+	stIndex = 0;
+	for each stPart in meta
+	{
+		if(stIndex < 7 && !stPart.startsWith("S:"))
+		{
+			stValue = stPart;
+			if(stIndex == 6 && stValue == "")
+			{
+				stValue = "-";
+			}
+			if(stIndex > 0)
+			{
+				stMetaText = stMetaText + ",";
+			}
+			stMetaText = stMetaText + stValue;
+			stIndex = stIndex + 1;
+		}
+	}
+	if(stIndex == 6)
+	{
+		stMetaText = stMetaText + ",-";
+		stIndex = 7;
+	}
+	if(stIndex == 7)
+	{
+		try
+		{
+			zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText});
+		}
+		catch (err)
+		{
+			info "stats not saved";
+		}
+	}
+	newAssignee = "";
+	for each cand in candList
+	{
+		candEmail = ifnull(cand.get("cliq"),"").toString().toLowerCase();
+		if(newAssignee == "" && candEmail != "" && !declined.toList(",").contains(candEmail))
+		{
+			newAssignee = candEmail;
+		}
+	}
+	cardText = tcText;
+	openButtons = List();
+	openButtons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	openButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	routeOutcome = "";
+	if(newAssignee != "")
+	{
+		delivered = true;
+		try
+		{
+			dmMsg = Map();
+			dmMsg.put("text",cardText);
+			dmMsg.put("slides",tcSlides);
+			dmMsg.put("card",{"title":ticketId + " · New bug for you","theme":"modern-inline"});
+			dmMsg.put("buttons",openButtons);
+			dmMsg.put("userids",newAssignee);
+			dmResp = zoho.cliq.postToBot(botName,dmMsg);
+			if(dmResp != null && dmResp.get("code") != null)
+			{
+				delivered = false;
+			}
+		}
+		catch (err)
+		{
+			delivered = false;
+		}
+		if(delivered)
+		{
+			zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":newAssignee});
+			routeOutcome = "Routed to " + newAssignee + ".";
+		}
+		else
+		{
+			declined = declined + "," + newAssignee;
+			routeOutcome = newAssignee + " couldn't be messaged (not subscribed to Flux). ";
+			newAssignee = "";
+		}
+	}
+	if(newAssignee == "")
+	{
+		zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":"unassigned"});
+		leadButtons = List();
+		for each b in openButtons
+		{
+			if(!b.get("key").startsWith("notmine-"))
+			{
+				leadButtons.add(b);
+			}
+		}
+		adminsDelivered = true;
+		try
+		{
+			dmMsg = Map();
+			dmMsg.put("text",cardText);
+			dmMsg.put("slides",tcLeadSlides);
+			dmMsg.put("card",{"title":ticketId + " · Needs an owner","theme":"modern-inline"});
+			dmMsg.put("buttons",leadButtons);
+			dmMsg.put("userids",escalateTo);
+			dmResp = zoho.cliq.postToBot(botName,dmMsg);
+			if(dmResp != null && dmResp.get("code") != null)
+			{
+				adminsDelivered = false;
+			}
+		}
+		catch (err)
+		{
+			adminsDelivered = false;
+		}
+		routeOutcome = routeOutcome + "No linked developer is available for this bug, so it went to " + escalateName + ".";
+	}
+	if(routeId != "")
+	{
+		zoho.cliq.updateRecord(routeDb,routeId,{"declined":declined,"pending":"","reminders":0,"changedat":nowMs});
+	}
+	outcome = "↩️ " + myName + " says " + label + " isn't their code. " + routeOutcome;
+	outcomeMsg = {"text":outcome};
+	sent = true;
+	try
+	{
+		notifyResp = zoho.cliq.postToChat(originChat,outcomeMsg);
+		if(notifyResp != null && notifyResp.get("code") != null)
+		{
+			sent = false;
+		}
+	}
+	catch (err)
+	{
+		sent = false;
+	}
+	if(!sent)
+	{
+		try
+		{
+			outcomeMsg.put("userids",reporter);
+			zoho.cliq.postToBot(botName,outcomeMsg);
+		}
+		catch (err)
+		{
+			info "could not notify the reporter";
+		}
+	}
+	return {"type":"message_edit","text":cardInfo + "\n\n↩️ *You passed this on.* " + routeOutcome,"card":{"title":ticketId + " · Passed on","theme":"modern-inline"},"slides":tcSlides};
+}
+else if(op == "wontfix" || op == "forward" || op == "needinfo")
+{
+	if(!isOwner && !unassigned)
+	{
+		return {"text":label + " is assigned to " + assignee + "."};
+	}
+	if(status != "Open" && status != "In progress")
+	{
+		return {"text":label + " is " + statusWords + ", so this can't be done now."};
+	}
+	// Remember this card so the form can update it afterwards.
+	msgRef = "";
+	try
+	{
+		msgRef = chat.get("id") + "|" + message.get("id");
+	}
+	catch (err)
+	{
+		msgRef = "";
+	}
+	inputs = List();
+	inputs.add({"type":"hidden","name":"ticket","value":op + "-" + recordId});
+	inputs.add({"type":"hidden","name":"msgref","value":msgRef});
+	if(op == "forward")
+	{
+		forwardPick = Map();
+		forwardPick.put("type","native_select");
+		forwardPick.put("data_source","contacts");
+		forwardPick.put("name","email");
+		forwardPick.put("label","Forward to");
+		forwardPick.put("placeholder","Choose a member of this organization");
+		forwardPick.put("mandatory",true);
+		inputs.add(forwardPick);
+		inputs.add({"type":"textarea","name":"note","label":"Comment","placeholder":"Why are you forwarding this?","mandatory":false});
+		return {"type":"form","title":"Forward " + ticketId,"name":"ticketnote","hint":"Reassign this bug to someone else.","button_label":"Forward","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
+	if(op == "needinfo")
+	{
+		inputs.add({"type":"textarea","name":"note","label":"Your question","placeholder":"Which browser were you using?","mandatory":true});
+		return {"type":"form","title":"Ask the reporter","name":"ticketnote","hint":"Flux sends your question to " + reporter + ".","button_label":"Ask","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+	}
+	inputs.add({"type":"textarea","name":"note","label":"Reason","placeholder":"Not a bug, works as designed, duplicate…","mandatory":true});
+	return {"type":"form","title":"Won't fix " + ticketId,"name":"ticketnote","hint":"The reporter will see your reason.","button_label":"Won't fix","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+}
+else if(op == "fixed")
+{
+	if(status == "Fixed" && isOwner)
+	{
+		return {"text":"You already marked " + label + " fixed. It's waiting for the reporter to confirm."};
+	}
+	if(status != "In progress")
+	{
+		return {"text":label + " is " + statusWords + ", so it can't be marked fixed now."};
+	}
+	if(!isOwner)
+	{
+		return {"text":label + " is assigned to " + assignee + "."};
+	}
+	stMap.put("x",nowMs.toString());
+	stMap.put("fx",me);
+	zoho.cliq.updateRecord(dbName,recordId,{"status":"Fixed"});
+	// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+	stText = "";
+	for each stKey in stMap.keys()
+	{
+		if(stText != "")
+		{
+			stText = stText + ";";
+		}
+		stText = stText + stKey + "=" + stMap.get(stKey).toString();
+	}
+	stMetaText = "";
+	stIndex = 0;
+	for each stPart in meta
+	{
+		if(stIndex < 7 && !stPart.startsWith("S:"))
+		{
+			stValue = stPart;
+			if(stIndex == 6 && stValue == "")
+			{
+				stValue = "-";
+			}
+			if(stIndex > 0)
+			{
+				stMetaText = stMetaText + ",";
+			}
+			stMetaText = stMetaText + stValue;
+			stIndex = stIndex + 1;
+		}
+	}
+	if(stIndex == 6)
+	{
+		stMetaText = stMetaText + ",-";
+		stIndex = 7;
+	}
+	if(stIndex == 7)
+	{
+		try
+		{
+			zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText});
+		}
+		catch (err)
+		{
+			info "stats not saved";
+		}
+	}
+	if(routeId != "")
+	{
+		zoho.cliq.updateRecord(routeDb,routeId,{"reminders":0,"changedat":nowMs});
+	}
+	doneButtons = List();
+	doneButtons.add({"label":"Close ticket","type":"+","key":"close-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	doneButtons.add({"label":"Still broken","type":"-","key":"broken-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	fixedMsg = {"text":"🛠️ " + label + " was marked fixed by " + myName + ". Please check it, then close the ticket or say it's still broken.","buttons":doneButtons};
+	sent = true;
+	try
+	{
+		notifyResp = zoho.cliq.postToChat(originChat,fixedMsg);
+		if(notifyResp != null && notifyResp.get("code") != null)
+		{
+			sent = false;
+		}
+	}
+	catch (err)
+	{
+		sent = false;
+	}
+	if(!sent)
+	{
+		try
+		{
+			fixedMsg.put("userids",reporter);
+			zoho.cliq.postToBot(botName,fixedMsg);
+		}
+		catch (err)
+		{
+			info "could not notify the reporter";
+		}
+	}
+	if(followers != "")
+	{
+		try
+		{
+			zoho.cliq.postToBot(botName,{"text":"🛠️ " + label + ", which you also reported, was marked fixed by " + myName + ".","userids":followers});
+		}
+		catch (err)
+		{
+			info "could not notify followers";
+		}
+	}
+	return {"type":"message_edit","text":cardInfo + "\n\n🛠️ *Marked fixed.* Waiting for the reporter to confirm.","card":{"title":ticketId + " · Fixed","theme":"modern-inline"},"slides":tcSlides};
+}
+else if(op == "close" || op == "broken")
+{
+	if(op == "broken" && status == "In progress" && me == reporter)
+	{
+		return {"text":"You already said " + label + " is still broken. It's back with " + assignee + "."};
+	}
+	if(status != "Fixed")
+	{
+		return {"text":label + " is " + statusWords + ", so there's nothing to confirm yet."};
+	}
+	if(me != reporter)
+	{
+		return {"text":"Only the reporter (" + reporter + ") can do this."};
+	}
+	if(op == "close")
+	{
+		stMap.put("e",nowMs.toString());
+		stMap.put("end","closed");
+		zoho.cliq.updateRecord(dbName,recordId,{"status":"Closed"});
+		// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+		stText = "";
+		for each stKey in stMap.keys()
+		{
+			if(stText != "")
+			{
+				stText = stText + ";";
+			}
+			stText = stText + stKey + "=" + stMap.get(stKey).toString();
+		}
+		stMetaText = "";
+		stIndex = 0;
+		for each stPart in meta
+		{
+			if(stIndex < 7 && !stPart.startsWith("S:"))
+			{
+				stValue = stPart;
+				if(stIndex == 6 && stValue == "")
+				{
+					stValue = "-";
+				}
+				if(stIndex > 0)
+				{
+					stMetaText = stMetaText + ",";
+				}
+				stMetaText = stMetaText + stValue;
+				stIndex = stIndex + 1;
+			}
+		}
+		if(stIndex == 6)
+		{
+			stMetaText = stMetaText + ",-";
+			stIndex = 7;
+		}
+		if(stIndex == 7)
+		{
+			try
+			{
+				zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText});
+			}
+			catch (err)
+			{
+				info "stats not saved";
+			}
+		}
+		if(followers != "")
+		{
+			try
+			{
+				zoho.cliq.postToBot(botName,{"text":"🎉 " + label + ", which you also reported, is fixed and closed.","userids":followers});
+			}
+			catch (err)
+			{
+				info "could not notify followers";
+			}
+		}
+		// closed tickets no longer count as duplicates
+		try
+		{
+			p = zoho.cliq.extension.getProperties("indexer");
+			closeSvc = services.get(tService);
+			if(p != null && p.get("indexer") != null && closeSvc != null)
+			{
+				idx = p.get("indexer").toMap();
+				removeBody = Map();
+				removeBody.put("namespace",closeSvc.get("namespace"));
+				removeBody.put("record_id",recordId);
+				removeResp = invokeurl
+				[
+					url :idx.get("url") + "/tickets/remove"
+					type :POST
+					parameters:removeBody.toString()
+					headers:{"X-Conduit-Secret":idx.get("secret"),"Content-Type":"application/json"}
+				];
+			}
+		}
+		catch (err)
+		{
+			info "could not remove the ticket from duplicate checks";
+		}
+		return {"type":"message_edit","text":"🛠️ " + label + " was marked fixed.\n\n🎉 *You closed this ticket.* Thanks for reporting it!"};
+	}
+	zoho.cliq.updateRecord(dbName,recordId,{"status":"In progress"});
+	if(routeId != "")
+	{
+		zoho.cliq.updateRecord(routeDb,routeId,{"reminders":0,"changedat":nowMs});
+	}
+	cardText = tcText;
+	workButtons = List();
+	workButtons.add({"label":"Mark fixed","type":"+","key":"fixed-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	workButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+	cardText = cardText + "\n\n🔁 The reporter says this is *still broken*.";
+	delivered = true;
+	try
+	{
+		dmMsg = Map();
+		dmMsg.put("text",cardText);
+		dmMsg.put("slides",tcSlides);
+		dmMsg.put("card",{"title":ticketId + " · Still broken","theme":"modern-inline"});
+		dmMsg.put("buttons",workButtons);
+		dmMsg.put("userids",assignee);
+		dmResp = zoho.cliq.postToBot(botName,dmMsg);
+		if(dmResp != null && dmResp.get("code") != null)
+		{
+			delivered = false;
+		}
+	}
+	catch (err)
+	{
+		delivered = false;
+	}
+	return {"type":"message_edit","text":"🛠️ " + label + " was marked fixed.\n\n🔁 *You said it's still broken.* It went back to the developer."};
+}
+else if(op == "answer" || op == "skip")
+{
+	if(status != "Needs info")
+	{
+		if(op == "skip")
+		{
+			return {"text":label + " was already sent to the team."};
+		}
+		return {"text":label + " isn't waiting for answers any more."};
+	}
+	if(me != reporter)
+	{
+		return {"text":"Only the reporter (" + reporter + ") can answer these questions."};
+	}
+	if(op == "skip")
+	{
+		if(pending != "triage")
+		{
+			return {"text":"A developer asked this question; please answer it."};
+		}
+		newAssignee = "";
+		for each cand in candList
+		{
+			candEmail = ifnull(cand.get("cliq"),"").toString().toLowerCase();
+			if(newAssignee == "" && candEmail != "" && !declined.toList(",").contains(candEmail))
+			{
+				newAssignee = candEmail;
+			}
+		}
+		minConfidence = 60;
+		try
+		{
+			p = zoho.cliq.extension.getProperties("routing");
+			if(p != null && p.get("routing") != null)
+			{
+				minText = ifnull(p.get("routing").toMap().get("minconfidence"),"60").toString();
+				if(minText.matches("[0-9]{1,3}"))
+				{
+					minConfidence = minText.toLong();
+				}
+			}
+		}
+		catch (err)
+		{
+			minConfidence = 60;
+		}
+		// Below the minimum confidence, the team lead picks the owner instead.
+		// Candidates carry pct (confidence) and share. The first also carries where, the AI view of the code.
+		chosenPct = 100;
+		whereText = "";
+		confWho = "";
+		whoShown = 0;
+		for each pc in candList
+		{
+			pcEmail = ifnull(pc.get("cliq"),"").toString().toLowerCase();
+			pcPct = ifnull(pc.get("pct"),"").toString();
+			if(newAssignee != "" && pcEmail == newAssignee && pcPct.matches("[0-9]{1,3}"))
+			{
+				chosenPct = pcPct.toLong();
+			}
+			if(whereText == "")
+			{
+				whereText = ifnull(pc.get("where"),"").toString();
+			}
+			pcShare = ifnull(pc.get("share"),"").toString();
+			if(whoShown < 3 && pcShare != "")
+			{
+				pcLabel = ifnull(pc.get("name"),"").toString();
+				if(pcEmail != "")
+				{
+					pcLabel = pcLabel + " (" + pcEmail + ")";
+				}
+				else
+				{
+					pcLabel = pcLabel + ", not linked";
+				}
+				confWho = confWho + "\n   " + pcLabel + ": " + pcShare + "% of the matched code";
+				whoShown = whoShown + 1;
+			}
+		}
+		lowConfidence = false;
+		if(newAssignee != "" && chosenPct < minConfidence)
+		{
+			lowConfidence = true;
+			newAssignee = "";
+		}
+		confText = "";
+		if(lowConfidence)
+		{
+			filled = (chosenPct.toDecimal() / 20).round(0);
+			meter = "";
+			for each step in {1,2,3,4,5}
+			{
+				if(step <= filled)
+				{
+					meter = meter + "▰";
+				}
+				else
+				{
+					meter = meter + "▱";
+				}
+			}
+			confText = "\n\n*Routing confidence:* " + meter + " " + chosenPct.toString() + "% (minimum " + minConfidence.toString() + "%)";
+		}
+		if(whereText != "")
+		{
+			confText = confText + "\n• *Where:* " + whereText;
+		}
+		if(confWho != "")
+		{
+			confText = confText + "\n• *Who:*" + confWho;
+		}
+		cardText = tcText;
+		openButtons = List();
+		openButtons.add({"label":"Accept","type":"+","key":"accept-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		openButtons.add({"label":"Not mine","type":"-","key":"notmine-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		openButtons.add({"label":"Won't fix","type":"-","key":"wontfix-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		openButtons.add({"label":"Forward","type":"+","key":"forward-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		openButtons.add({"label":"Need info","type":"+","key":"needinfo-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		routeOutcome = "";
+		if(newAssignee != "")
+		{
+			delivered = true;
+			try
+			{
+				dmMsg = Map();
+				dmMsg.put("text",cardText);
+				dmMsg.put("slides",tcSlides);
+				dmMsg.put("card",{"title":ticketId + " · New bug for you","theme":"modern-inline"});
+				dmMsg.put("buttons",openButtons);
+				dmMsg.put("userids",newAssignee);
+				dmResp = zoho.cliq.postToBot(botName,dmMsg);
+				if(dmResp != null && dmResp.get("code") != null)
+				{
+					delivered = false;
+				}
+			}
+			catch (err)
+			{
+				delivered = false;
+			}
+			if(delivered)
+			{
+				zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":newAssignee});
+				routeOutcome = "Routed to " + newAssignee + ".";
+			}
+			else
+			{
+				declined = declined + "," + newAssignee;
+				routeOutcome = newAssignee + " couldn't be messaged (not subscribed to Flux). ";
+				newAssignee = "";
+			}
+		}
+		if(newAssignee == "")
+		{
+			zoho.cliq.updateRecord(dbName,recordId,{"status":"Open","assignee":"unassigned"});
+			leadTitle = ticketId + " · Needs an owner";
+			leadText = cardText;
+			// Lead card: the confidence goes before the owners table.
+			tcConfRows = List();
+			if(lowConfidence)
+			{
+				tcFilled = (chosenPct.toDecimal() / 10).round(0);
+				tcMeter = "";
+				for each tcStep in {1,2,3,4,5,6,7,8,9,10}
+				{
+					if(tcStep <= tcFilled)
+					{
+						tcMeter = tcMeter + "▰";
+					}
+					else
+					{
+						tcMeter = tcMeter + "▱";
+					}
+				}
+				tcConfRows.add({"Confidence":tcMeter + " " + chosenPct.toString() + "% (minimum " + minConfidence.toString() + "%)"});
+			}
+			if(whereText != "")
+			{
+				tcWhere = whereText;
+				if(tcWhere.length() > 1)
+				{
+					tcWhere = tcWhere.subString(0,1).toUpperCase() + tcWhere.subString(1);
+				}
+				tcConfRows.add({"Where":tcWhere});
+			}
+			// Sum up the top two candidates in one line.
+			tcVerdict = "";
+			if(candList.size() > 0)
+			{
+				tcFirst = candList.get(0);
+				tcFirstName = ifnull(tcFirst.get("name"),"").toString();
+				tcFirstShare = ifnull(tcFirst.get("share"),"").toString();
+				if(ifnull(tcFirst.get("cliq"),"").toString() == "")
+				{
+					tcVerdict = "Most of the code is by " + tcFirstName + ", who is not linked to a Cliq user";
+				}
+				else if(candList.size() > 1)
+				{
+					tcSecond = candList.get(1);
+					tcSecondShare = ifnull(tcSecond.get("share"),"").toString();
+					tcVerdict = tcFirstName + " " + tcFirstShare + "%, " + ifnull(tcSecond.get("name"),"").toString() + " " + tcSecondShare + "%";
+					if(tcFirstShare.matches("[0-9]{1,3}") && tcSecondShare.matches("[0-9]{1,3}"))
+					{
+						if(tcFirstShare.toLong() - tcSecondShare.toLong() < 15)
+						{
+							tcVerdict = "Close call: " + tcVerdict;
+						}
+					}
+				}
+				else if(tcFirstShare != "")
+				{
+					tcVerdict = "Clear owner: " + tcFirstName + " has " + tcFirstShare + "% of the matched code";
+				}
+			}
+			if(tcVerdict != "")
+			{
+				tcConfRows.add({"Who":tcVerdict});
+			}
+			tcDecideSlides = List();
+			tcDecideSlides.addAll(tcBaseSlides);
+			if(tcConfRows.size() > 0)
+			{
+				tcConfSlide = Map();
+				tcConfSlide.put("type","label");
+				tcConfSlide.put("title","Routing confidence");
+				tcConfSlide.put("data",tcConfRows);
+				tcDecideSlides.add(tcConfSlide);
+			}
+			if(tcOwnerLead.size() > 0)
+			{
+				tcDecideTable = Map();
+				tcDecideTable.put("type","table");
+				tcDecideTable.put("title","Likely owners");
+				tcDecideTable.put("data",{"headers":{"Developer","GitHub","Cliq user","Share"},"rows":tcOwnerLead});
+				tcDecideSlides.add(tcDecideTable);
+			}
+			leadButtons = List();
+			if(lowConfidence)
+			{
+				// Close call: let the lead pick from the likely owners.
+				leadTitle = ticketId + " · Who should own this?";
+				assignShown = 0;
+				candIndex = 0;
+				for each ac in candList
+				{
+					acEmail = ifnull(ac.get("cliq"),"").toString().toLowerCase();
+					if(assignShown < 2 && acEmail != "" && !declined.toList(",").contains(acEmail))
+					{
+						acName = ifnull(ac.get("name"),"").toString().trim();
+						if(acName == "")
+						{
+							acName = acEmail.getPrefix("@");
+						}
+						if(acName.contains(" "))
+						{
+							acName = acName.getPrefix(" ");
+						}
+						// Buttons hold about 20 characters, so only really long names get shortened.
+						if(acName.length() > 13)
+						{
+							acName = acName.subString(0,12) + "…";
+						}
+						acLabel = "Assign " + acName;
+						assignButton = Map();
+						assignButton.put("label",acLabel);
+						assignButton.put("type","+");
+						assignButton.put("key","assignto-" + recordId + "-" + candIndex.toString());
+						assignButton.put("action",{"type":"invoke.function","data":{"name":"conduitticketaction"}});
+						leadButtons.add(assignButton);
+						assignShown = assignShown + 1;
+					}
+					candIndex = candIndex + 1;
+				}
+				for each b in openButtons
+				{
+					bKey = b.get("key");
+					if(bKey.startsWith("forward-") || bKey.startsWith("needinfo-") || bKey.startsWith("wontfix-"))
+					{
+						leadButtons.add(b);
+					}
+				}
+			}
+			else
+			{
+				// Nobody owns it yet, so leave out Not mine.
+				for each b in openButtons
+				{
+					if(!b.get("key").startsWith("notmine-"))
+					{
+						leadButtons.add(b);
+					}
+				}
+			}
+			adminsDelivered = true;
+			try
+			{
+				dmMsg = Map();
+				dmMsg.put("text",leadText);
+				dmMsg.put("slides",tcDecideSlides);
+				dmMsg.put("card",{"title":leadTitle,"theme":"modern-inline"});
+				dmMsg.put("buttons",leadButtons);
+				dmMsg.put("userids",escalateTo);
+				dmResp = zoho.cliq.postToBot(botName,dmMsg);
+				if(dmResp != null && dmResp.get("code") != null)
+				{
+					adminsDelivered = false;
+				}
+			}
+			catch (err)
+			{
+				adminsDelivered = false;
+			}
+			routeOutcome = routeOutcome + "No linked developer is available for this bug, so it went to " + escalateName + ".";
+		}
+		// Conduit stats: who the bug went to first.
+		stMap = Map();
+		if(newAssignee != "")
+		{
+			stMap.put("f",newAssignee);
+			stMap.put("v","direct");
+		}
+		else
+		{
+			stMap.put("f","lead");
+			stMap.put("v","owner");
+			if(lowConfidence)
+			{
+				stMap.put("v","lead");
+			}
+		}
+		// Save the stats record as meta field 8. Field 7 (followers) gets "-" when empty.
+		stText = "";
+		for each stKey in stMap.keys()
+		{
+			if(stText != "")
+			{
+				stText = stText + ";";
+			}
+			stText = stText + stKey + "=" + stMap.get(stKey).toString();
+		}
+		stMetaText = "";
+		stIndex = 0;
+		for each stPart in meta
+		{
+			if(stIndex < 7 && !stPart.startsWith("S:"))
+			{
+				stValue = stPart;
+				if(stIndex == 6 && stValue == "")
+				{
+					stValue = "-";
+				}
+				if(stIndex > 0)
+				{
+					stMetaText = stMetaText + ",";
+				}
+				stMetaText = stMetaText + stValue;
+				stIndex = stIndex + 1;
+			}
+		}
+		if(stIndex == 6)
+		{
+			stMetaText = stMetaText + ",-";
+			stIndex = 7;
+		}
+		if(stIndex == 7)
+		{
+			try
+			{
+				zoho.cliq.updateRecord(dbName,recordId,{"meta":stMetaText + ",S:" + stText});
+			}
+			catch (err)
+			{
+				info "stats not saved";
+			}
+		}
+		if(routeId != "")
+		{
+			zoho.cliq.updateRecord(routeDb,routeId,{"declined":declined,"pending":"","reminders":0,"changedat":nowMs});
+		}
+		rStatus = "With the " + tService + " team";
+		if(newAssignee != "")
+		{
+			rStatus = "Assigned to " + newAssignee;
+		}
+		rRows = List();
+		rRows.add({"Ticket":ticketId});
+		rRows.add({"Project":tService});
+		rRows.add({"Severity":tSeverity});
+		rRows.add({"Status":rStatus});
+		shotButtons = List();
+		shotButtons.add({"label":"Add screenshots","type":"+","key":"attach-" + recordId,"action":{"type":"invoke.function","data":{"name":"conduitticketaction"}}});
+		return {"type":"message_edit","text":"*" + tTitle + "*\nYou'll be notified here when a developer picks it up.","card":{"title":"Bug reported","theme":"modern-inline"},"slides":{{"type":"label","data":rRows}},"buttons":shotButtons};
+	}
+	qs = questions.toList(" | ");
+	// Remember this card so the form can update it afterwards.
+	msgRef = "";
+	try
+	{
+		msgRef = chat.get("id") + "|" + message.get("id");
+	}
+	catch (err)
+	{
+		msgRef = "";
+	}
+	inputs = List();
+	inputs.add({"type":"hidden","name":"ticket","value":"answer-" + recordId});
+	inputs.add({"type":"hidden","name":"msgref","value":msgRef});
+	n = 0;
+	for each q in qs
+	{
+		n = n + 1;
+		inputs.add({"type":"textarea","name":"a" + n,"label":"Question " + n,"hint":q,"placeholder":"Your answer","mandatory":false});
+	}
+	if(n == 0)
+	{
+		inputs.add({"type":"textarea","name":"a1","label":"More detail","placeholder":"Anything that helps reproduce the bug","mandatory":true});
+	}
+	return {"type":"form","title":"Answer for " + ticketId,"name":"ticketnote","hint":"Your answers go to the developer working on this bug.","button_label":"Send","inputs":inputs,"action":{"type":"invoke.function","name":"conduitformsubmit"}};
+}
+return {"text":"Unknown action."};
